@@ -51,30 +51,33 @@ class GridEnv:
 
         # 3. Résolution du Power Flow (AC)
         try:
-            # Utilisation de Newton-Raphson (standard pour distribution)
             pp.runpp(self.net, algorithm='nr')
             converged = True
+            vm_pu = self.net.res_bus.vm_pu.values
         except pp.LoadflowNotConverged:
             converged = False
-            
+            # If PF fails, return a strong congestion signal
+            vm_pu = np.ones(len(self.net.bus)) * np.nan
+
         # 4. Calcul des métriques et pénalités
-        # Tension aux bus (Voltage Magnitude en p.u.)
-        vm_pu = self.net.res_bus.vm_pu
-        
-        # Pénalité globale de tension (Section 1.2 [cite: 33-34])
-        # On vérifie si v < Vmin ou v > Vmax
-        voltage_violations = np.sum((vm_pu < self.v_min) | (vm_pu > self.v_max))
-        
-        # Signal de congestion (lambda_grid) basé sur la violation la plus sévère
-        # [cite: 85] lambda_grid est un signal observé par l'agent
-        max_deviation = np.max(np.abs(vm_pu - 1.0))
-        lambda_grid = max_deviation if voltage_violations > 0 else 0.0
-        
+        if converged:
+            max_deviation = float(np.max(np.abs(vm_pu - 1.0)))
+            voltage_violations = int(np.sum((vm_pu < self.v_min) | (vm_pu > self.v_max)))
+
+            # Continuous lambda_grid: scale deviation by 0.05 p.u. band
+            lambda_grid = float(np.clip(max_deviation / 0.05, 0.0, 2.0))
+            min_v = float(np.min(vm_pu))
+            max_v = float(np.max(vm_pu))
+        else:
+            voltage_violations = -1
+            lambda_grid = 2.0
+            min_v = float('nan')
+            max_v = float('nan')
         info = {
             'converged': converged,
             'voltage_violations': voltage_violations,
-            'min_voltage': np.min(vm_pu),
-            'max_voltage': np.max(vm_pu)
+            'min_voltage': min_v,
+            'max_voltage': max_v
         }
         
         return lambda_grid, info

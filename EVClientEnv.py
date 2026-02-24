@@ -142,7 +142,7 @@ class EVClientEnv:
         alpha_constraint = 0.05 
         return self.max_power_base * (1 - alpha_constraint * soc)
 
-    def get_state(self, grid_signal, voltage_dev, price_forecast):
+    def get_state(self, grid_signal, voltage_dev, price_forecast, ev_total_mw=0.0, delta_ev_mw=0.0):
         """
         Constructs and NORMALIZES the state vector s_{i,t}.
         State: [SOC, Norm_Time_Sin, Norm_Time_Cos, Norm_Grid, Norm_Voltage, Norm_Prices...]
@@ -167,12 +167,20 @@ class EVClientEnv:
         s_grid = np.clip(grid_signal, 0.0, 1.0)
         # Voltage dev is small (e.g. 0.05 p.u.). We scale it up so NN sees it.
         s_volt = np.clip(voltage_dev * 10.0, -1.0, 1.0)
-        
+
         # 5. Price Forecast (Normalized)
         # Assuming max price is roughly $0.50/kWh. 
         # We want input to be roughly 0.0 to 1.0
         s_prices = [p / 0.50 for p in price_forecast]
         
+        # 6. Global EV aggregate load signals (broadcast)
+        # EV total load max is roughly: 20 EV * 11kW = 220kW = 0.22MW
+        # scale to ~[0,1]
+        s_ev_total = np.clip(ev_total_mw / 0.25, 0.0, 1.0)
+
+        # Ramp: typical delta might be up to ~0.10MW in extreme
+        s_ev_delta = np.clip(delta_ev_mw / 0.10, -1.0, 1.0)
+
         # Combine
         state = np.array([
             s_soc, 
@@ -180,7 +188,9 @@ class EVClientEnv:
             t_cos, 
             t_remaining_norm, 
             s_grid, 
-            s_volt
+            s_volt,
+            s_ev_total,
+            s_ev_delta
         ] + s_prices, dtype=np.float32)
         
         return state
@@ -270,141 +280,3 @@ class EVClientEnv:
 
 
 
-
-
-
-
-
-
-# import numpy as np
-# import math
-
-# class EVClientEnv:
-#     """
-#     Handles the physical modeling and MDP formulation for a single EV.
-#     Strategy: Penalty Minimization (Lagrangian approach).
-#     """
-#     def __init__(self, config):
-#         # --- Physical Parameters ---
-#         self.capacity = config.get('capacity', 60.0)    # [cite: 16]
-#         self.eta = config.get('efficiency', 0.95)       # [cite: 15]
-#         self.max_power_base = config.get('max_power', 11.0) # [cite: 22]
-#         self.dt = config.get('dt', 1.0)                 # [cite: 17]
-        
-#         # --- User Requirements ---
-#         self.soc_req = config.get('soc_req', 0.9)       # [cite: 25]
-#         self.initial_soc = config.get('initial_soc', 0.2)
-#         self.t_dep = config.get('t_dep', 12)            # [cite: 39]
-        
-#         # --- State Variables ---
-#         self.soc = self.initial_soc
-#         self.current_step = 0
-        
-#         # --- Penalty Weights (Hyperparameters) ---
-#         # "alpha" from Eq (11) in your PDF [cite: 91]
-#         # We assume alpha ~ 100.0, but we scale it down for PPO stability.
-#         self.w_tracking = 10.0   # Penalty for being empty (SOC < SOC_req)
-#         self.w_cost = 2.0        # Penalty for high energy prices
-#         self.w_grid = 1.5        # Penalty for grid congestion
-#         self.w_terminal = 50.0   # Big final penalty if we fail
-
-#     def _get_max_power(self, soc):
-#         """
-#         Calculates P_max based on non-linear charging constraint[cite: 22].
-#         """
-#         alpha_constraint = 0.05 
-#         return self.max_power_base * (1 - alpha_constraint * soc)
-
-#     def get_state(self, grid_signal, voltage_dev, price_forecast):
-#         """
-#         Constructs and Normalizes state s_{i,t}[cite: 85].
-#         """
-#         # 1. SOC [0, 1]
-#         s_soc = self.soc 
-        
-#         # 2. Cyclic Time (Sin/Cos)
-#         hour_of_day = self.current_step % 24
-#         t_sin = math.sin(2 * math.pi * hour_of_day / 24.0)
-#         t_cos = math.cos(2 * math.pi * hour_of_day / 24.0)
-        
-#         # 3. Remaining Time (Normalized)
-#         t_remaining_norm = (self.t_dep - self.current_step) / 24.0
-        
-#         # 4. Grid Signals (Clipped)
-#         s_grid = np.clip(grid_signal, 0.0, 1.0)
-#         s_volt = np.clip(voltage_dev * 10.0, -1.0, 1.0) # Scaled for visibility
-        
-#         # 5. Price Forecast (Normalized)
-#         s_prices = [p / 0.50 for p in price_forecast]
-        
-#         state = np.array([
-#             s_soc, 
-#             t_sin, 
-#             t_cos, 
-#             t_remaining_norm, 
-#             s_grid, 
-#             s_volt
-#         ] + s_prices, dtype=np.float32)
-        
-#         return state
-
-#     def step(self, action_power, grid_signal, voltage_dev, price_current):
-#         """
-#         Executes one step.
-#         Minimizes: Cost + Grid_Stress + Deviation_from_Target
-#         """
-#         # --- 1. Physics & Constraints ---
-#         p_max_phys = self._get_max_power(self.soc)
-        
-#         # Clip action to physical limits [-Pmax, +Pmax] [cite: 21]
-#         p_act = np.clip(action_power, -p_max_phys, p_max_phys)
-        
-#         # Energy Transfer
-#         energy_transfer = p_act * self.dt # kWh
-        
-#         # Update SOC [cite: 12]
-#         delta_soc = (self.eta * energy_transfer) / self.capacity
-#         prev_soc = self.soc
-#         self.soc = np.clip(self.soc + delta_soc, 0.0, 1.0)
-        
-#         self.current_step += 1
-        
-#         # --- 2. Penalty-Based Reward Calculation ---
-        
-#         # A. Tracking Penalty (Dense) [cite: 91]
-#         # Instead of waiting for the end, we penalize the gap at EVERY step.
-#         # This creates a "gradient" of pain that forces the agent to charge.
-#         # R_track = - w * (Target - Current)^2
-#         soc_gap = max(0, self.soc_req - self.soc)
-#         reward_tracking = -self.w_tracking * (soc_gap ** 2)
-        
-#         # B. Energy Cost Penalty [cite: 89]
-#         # We penalize spending money.
-#         # If Price is high, this penalty is high -> Agent pauses charging.
-#         # If Price is low, this penalty is low -> Agent charges to reduce 'tracking penalty'.
-#         cost = price_current * energy_transfer
-#         reward_cost = -self.w_cost * cost 
-        
-#         # C. Grid Congestion Penalty [cite: 87, 100]
-#         # Penalize charging during congestion (grid_signal > 0)
-#         reward_grid = -self.w_grid * abs(energy_transfer) * grid_signal
-        
-#         # D. Terminal Penalty (The "Failure" Check)
-#         done = False
-#         reward_terminal = 0.0
-        
-#         if self.current_step >= self.t_dep:
-#             done = True
-#             # If we missed the target, apply a final heavy penalty
-#             # This corresponds to the user being angry.
-#             if self.soc < self.soc_req:
-#                 reward_terminal = -self.w_terminal * ((self.soc_req - self.soc) ** 2)
-#             else:
-#                 # Optional: Small positive value to mark "perfect 0 penalty" state
-#                 reward_terminal = 10.0 
-
-#         # Total Reward (All Negative = "Cost Function")
-#         # Typical Value: -5.0 (Early) -> -0.1 (Late/Success)
-#         total_reward = reward_tracking + reward_cost + reward_grid + reward_terminal
-        
-#         return total_reward, done, self.soc

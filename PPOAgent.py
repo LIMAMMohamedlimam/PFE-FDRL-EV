@@ -34,8 +34,7 @@ class ActorCritic(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, action_dim),
-            nn.Tanh() # Output range [-1, 1]
+            nn.Linear(hidden_dim, action_dim)
         )
         
         # 2. Standard Deviation (sigma) - Determines exploration width
@@ -43,34 +42,35 @@ class ActorCritic(nn.Module):
         self.actor_log_std = nn.Parameter(torch.ones(1, action_dim) * np.log(std_init))
 
     def act(self, state):
-        """
-        Sample an action from the Gaussian distribution during training.
-        """
         action_mu = self.actor_mu(state)
         action_std = self.actor_log_std.exp().expand_as(action_mu)
-        
         dist = Normal(action_mu, action_std)
-        action = dist.sample()
-        
-        # Clamp action to [-1, 1] for stability, though Tanh mu helps keep it close
-        action = torch.clamp(action, -1.0, 1.0)
-        
-        return action.item(), dist.log_prob(action).sum(dim=-1), dist.entropy().sum(dim=-1)
+
+        z = dist.sample()
+        action = torch.tanh(z)
+
+        # Tanh-squash correction
+        log_prob = dist.log_prob(z) - torch.log(1 - action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(dim=-1)
+
+        entropy = dist.entropy().sum(dim=-1)
+        return action.item(), log_prob, entropy
     
     def evaluate(self, state, action):
-        """
-        Evaluate actions for PPO update (batch processing).
-        """
         action_mu = self.actor_mu(state)
         action_std = self.actor_log_std.exp().expand_as(action_mu)
-        
         dist = Normal(action_mu, action_std)
-        
-        # Log prob of the actions taken
-        action_logprobs = dist.log_prob(action).sum(dim=-1)
+
+        # Inverse tanh (atanh) to recover pre-squash action
+        action_clamped = torch.clamp(action, -0.999999, 0.999999)
+        z = torch.atanh(action_clamped)
+
+        log_prob = dist.log_prob(z) - torch.log(1 - action_clamped.pow(2) + 1e-6)
+        action_logprobs = log_prob.sum(dim=-1)
+
         dist_entropy = dist.entropy().sum(dim=-1)
         state_values = self.critic(state)
-        
+
         return action_logprobs, state_values, dist_entropy
 
 class PPOAgent(BaseAgent):
@@ -109,7 +109,8 @@ class PPOAgent(BaseAgent):
         if eval_mode:
             with torch.no_grad():
                 # In eval mode, use the Mean directly (Deterministic)
-                action = self.policy.actor_mu(state_tensor).item()
+                mu = self.policy.actor_mu(state_tensor)
+                action = torch.tanh(mu).item()
             return action
 
         # Training mode: Sample from Normal Distribution
