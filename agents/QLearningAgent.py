@@ -1,4 +1,4 @@
-from BaseAgent import BaseAgent
+from agents.BaseAgent import BaseAgent
 import numpy as np
 
 class QLearningAgent(BaseAgent):
@@ -72,5 +72,10 @@ class QLearningAgent(BaseAgent):
         self.q_table[state_key][action_idx] += self.lr * (target - prediction)
 
     def get_parameters(self):
-        # In a tabular setting, we send the Q-table (or gradients of it)
-        return self.q_table
+        """Return Q-table as a dict of {state_key: np.array(action_values)}."""
+        return {k: v.copy() for k, v in self.q_table.items()}
+
+    def set_parameters(self, parameters):
+        """Replace Q-table with aggregated global parameters."""
+        self.q_table = {k: v.copy() if isinstance(v, np.ndarray) else np.array(v)
+                        for k, v in parameters.items()}

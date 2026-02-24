@@ -1,7 +1,2 @@
-numba
 pandapower
-torch
-matplotlib
-numpy
-pandas
-tqdm
+questionary

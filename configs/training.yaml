@@ -1,0 +1,16 @@
+# training.yaml
+# High-level training, simulation registry, and pipeline configurations
+
+# Simulation Run
+num_episodes: 20         # Number of training episodes per agent/combo
+num_test_episodes: 2     # Number of test episodes per agent/combo
+simulation_hours: 24      # Episode length in hours
+num_agents: 10            # Number of EVs in the simulation
+grid_type: "case33bw"     # pandapower grid topology
+
+# Agent Optimization Frequency
+update_every: 1           # Update agent weights every N steps
+
+# FL Strategies Defaults
+fl_rounds: 300            # Total aggregation rounds (typically 1 round = 1 episode)
+fl_fraction: 1.0          # Fraction of clients participating per round

@@ -1,0 +1,17 @@
+# sac.yaml
+# Soft Actor-Critic hyperparameters
+
+# Core RL
+gamma: 0.99               # Discount factor
+tau: 0.005                # Target network soft update parameter
+lr: 3.0e-4                # Learning rate for actor, critic, and alpha
+
+# Replay & Batches
+batch_size: 256
+buffer_capacity: 100000   # 100k for diverse off-policy experience
+warmup_steps: 2000        # Random steps before first gradient update
+
+# Network & Entropy
+hidden_dim: 128           # Representational capacity of NN layers
+alpha_init: 0.2           # Initial temperature
+target_entropy_scale: -0.5 # target_entropy = action_dim * this_scale (less exploration)

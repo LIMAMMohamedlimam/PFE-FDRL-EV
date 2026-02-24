@@ -3,7 +3,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Normal
-from BaseAgent import BaseAgent
+from agents.BaseAgent import BaseAgent
+from utils.device_utils import get_device, device_info
 
 # 
 
@@ -77,18 +78,24 @@ class PPOAgent(BaseAgent):
     """
     Continuous PPO Agent.
     Action Space: [-1.0, 1.0] (Scaled to P_max in environment)
+
+    GPU: Networks and tensors are automatically placed on the best available
+    device (CUDA → MPS → CPU) via device_utils.get_device().
     """
     def __init__(self, input_dim, action_dim=1, lr=3e-4, gamma=0.99, eps_clip=0.2, K_epochs=4, update_timestep=2000):
+        # --- Device ---
+        self.device = get_device()
+
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
         self.update_timestep = update_timestep
         
         # Action dim is usually 1 (Power) for EV charging
-        self.policy = ActorCritic(input_dim, action_dim)
+        self.policy = ActorCritic(input_dim, action_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         
-        self.policy_old = ActorCritic(input_dim, action_dim)
+        self.policy_old = ActorCritic(input_dim, action_dim).to(self.device)
         self.policy_old.load_state_dict(self.policy.state_dict())
         
         self.buffer_states = []
@@ -104,7 +111,7 @@ class PPOAgent(BaseAgent):
         """
         Returns a continuous action value in range [-1, 1].
         """
-        state_tensor = torch.FloatTensor(state).unsqueeze(0) # Add batch dim
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
 
         if eval_mode:
             with torch.no_grad():
@@ -122,10 +129,10 @@ class PPOAgent(BaseAgent):
 
     def update(self, state, action, reward, next_state, done=False):
         """
-        Standard PPO buffer storage.
+        Standard PPO buffer storage. Tensors stored on device.
         """
-        self.buffer_states.append(torch.FloatTensor(state))
-        self.buffer_actions.append(torch.FloatTensor([action])) # Action is float now
+        self.buffer_states.append(torch.FloatTensor(state).to(self.device))
+        self.buffer_actions.append(torch.FloatTensor([action]).to(self.device))
         self.buffer_logprobs.append(self.current_log_prob)
         self.buffer_rewards.append(reward)
         self.buffer_is_terminals.append(done)
@@ -145,13 +152,13 @@ class PPOAgent(BaseAgent):
             discounted_reward = reward + (self.gamma * discounted_reward)
             rewards.insert(0, discounted_reward)
             
-        rewards = torch.tensor(rewards, dtype=torch.float32)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
         if rewards.std() > 1e-5:
              rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
 
-        # 2. Convert list to tensors
+        # 2. Convert list to tensors (already on device)
         old_states = torch.stack(self.buffer_states).detach()
-        old_actions = torch.stack(self.buffer_actions).detach().squeeze() # Ensure correct shape
+        old_actions = torch.stack(self.buffer_actions).detach().squeeze()
         old_logprobs = torch.stack(self.buffer_logprobs).detach().squeeze()
 
         # Handle simplified shape case (if batch size is small or 1D)
@@ -190,9 +197,10 @@ class PPOAgent(BaseAgent):
         self.buffer_is_terminals.clear()
 
     def get_parameters(self):
+        """Always returns CPU numpy arrays so FL aggregation works regardless of device."""
         return {k: v.cpu().numpy() for k, v in self.policy.state_dict().items()}
 
     def set_parameters(self, parameters):
-        new_state_dict = {k: torch.from_numpy(v) for k, v in parameters.items()}
+        new_state_dict = {k: torch.from_numpy(v).to(self.device) for k, v in parameters.items()}
         self.policy.load_state_dict(new_state_dict)
         self.policy_old.load_state_dict(new_state_dict)

@@ -103,174 +103,140 @@
 import numpy as np
 import math
 
+# We use absolute imports to be robust across the modular structure
+from utils.config_loader import get_config
+from utils.reward_functions import compute_reward
+
 class EVClientEnv:
     """
     Handles the physical modeling and MDP formulation for a single EV.
-    Updated for PPO Stability: Normalized States & Scaled Rewards.
+    Configured via env.yaml and reward.yaml.
     """
-    def __init__(self, config):
+    def __init__(self, override_env_config=None):
+        """
+        Args:
+            override_env_config (dict): Dynamic episode-specific parameters
+                                        (e.g., initial_soc, soc_req, t_dep)
+                                        that override the base env.yaml constants.
+        """
+        # Load base configs
+        self.env_config = get_config('env')
+        self.reward_config = get_config('reward')
+        
+        # Merge overrides (for driver-specific parameters)
+        cfg = self.env_config.copy()
+        if override_env_config:
+            cfg.update(override_env_config)
+
         # --- Physical Parameters ---
-        # [cite: 13-17]
-        self.capacity = config.get('capacity', 60.0)    # C_i (kWh)
-        self.eta = config.get('efficiency', 0.95)       # eta
-        self.max_power_base = config.get('max_power', 11.0) # u_bar (kW)
-        self.dt = config.get('dt', 1.0)                 # Delta t (hours)
+        self.capacity        = cfg.get('capacity', 60.0)
+        self.eta             = cfg.get('eta', 0.95)
+        self.max_power_base  = cfg.get('max_power', 11.0)
+        self.dt              = cfg.get('dt', 1.0)
         
+        # --- CC-CV Profile Coefficient ---
+        self.alpha_constraint = cfg.get('alpha_constraint', 0.05)
+
         # --- User Requirements ---
-        # [cite: 24, 25]
-        self.soc_req = config.get('soc_req', 0.9)       # Target SOC
-        self.initial_soc = config.get('initial_soc', 0.2)
-        self.t_dep = config.get('t_dep', 12)            # Duration (hours)
-        
+        self.soc_req     = cfg.get('soc_req', 0.9)
+        self.initial_soc = cfg.get('initial_soc', 0.2)
+        self.t_dep       = cfg.get('t_dep', 12)
+
         # --- State Variables ---
-        self.soc = self.initial_soc
+        self.soc          = self.initial_soc
         self.current_step = 0
-        
-        # --- Reward Weights (Scaled for PPO) ---
-        # We reduced these significantly from 100.0 to prevent gradient explosion
-        self.w_satisfaction = 20.0  # Bonus for hitting target
-        self.w_grid = 1.0           # Penalty for grid stress
-        self.w_cost = 1.0           # Penalty for electricity cost
-        
+
     def _get_max_power(self, soc):
         """
-        Calculates P_max based on non-linear charging constraint.
-        Formula: P_max = u_bar * (1 - alpha * SOC) 
-        [cite: 22]
+        Non-linear CC-CV charging constraint.
+        P_max = ū · (1 − α · SOC)
         """
-        # Alpha coefficient represents CC-CV curve (Constant Current - Constant Voltage)
-        alpha_constraint = 0.05 
-        return self.max_power_base * (1 - alpha_constraint * soc)
+        return self.max_power_base * (1 - self.alpha_constraint * soc)
 
     def get_state(self, grid_signal, voltage_dev, price_forecast, ev_total_mw=0.0, delta_ev_mw=0.0):
         """
-        Constructs and NORMALIZES the state vector s_{i,t}.
-        State: [SOC, Norm_Time_Sin, Norm_Time_Cos, Norm_Grid, Norm_Voltage, Norm_Prices...]
+        Constructs and normalises the state vector s_{i,t}.
+        s = [SOC, t_sin, t_cos, t_remaining, grid, voltage, ev_total, ev_delta, *prices]
         [cite: 85, 121]
         """
-        # 1. SOC is already [0, 1] [cite: 13]
-        s_soc = self.soc 
-        
-        # 2. Time Encoding (Cyclic)
-        # We map the 24h cycle to Sin/Cos to help NN understand periodicity
-        # t_dep is usually relative, but here we treat current_step as hour of day context
+        s_soc = self.soc
+
+        # Cyclic time encoding (captures hour-of-day periodicity)
         hour_of_day = self.current_step % 24
         t_sin = math.sin(2 * math.pi * hour_of_day / 24.0)
         t_cos = math.cos(2 * math.pi * hour_of_day / 24.0)
-        
-        # 3. Remaining Time (Normalized)
-        # 0.0 means "right now", 1.0 means "plenty of time" (assuming max stay ~24h)
+
+        # Remaining time, normalised to [0, 1] over a 24-h window
         t_remaining_norm = (self.t_dep - self.current_step) / 24.0
-        
-        # 4. Grid & Voltage (Clipped & Scaled)
-        # Grid signal typically 0 (safe) to 1 (congested). We clip to be safe.
+
+        # Grid & voltage — clipped and scaled
         s_grid = np.clip(grid_signal, 0.0, 1.0)
-        # Voltage dev is small (e.g. 0.05 p.u.). We scale it up so NN sees it.
         s_volt = np.clip(voltage_dev * 10.0, -1.0, 1.0)
 
-        # 5. Price Forecast (Normalized)
-        # Assuming max price is roughly $0.50/kWh. 
-        # We want input to be roughly 0.0 to 1.0
+        # Price forecast (normalised; assumed max ≈ $0.50/kWh)
         s_prices = [p / 0.50 for p in price_forecast]
-        
-        # 6. Global EV aggregate load signals (broadcast)
-        # EV total load max is roughly: 20 EV * 11kW = 220kW = 0.22MW
-        # scale to ~[0,1]
-        s_ev_total = np.clip(ev_total_mw / 0.25, 0.0, 1.0)
 
-        # Ramp: typical delta might be up to ~0.10MW in extreme
-        s_ev_delta = np.clip(delta_ev_mw / 0.10, -1.0, 1.0)
+        # Aggregate EV load signals (broadcast from EdgeAggregator)
+        s_ev_total = np.clip(ev_total_mw / 0.25,  0.0,  1.0)
+        s_ev_delta = np.clip(delta_ev_mw / 0.10, -1.0,  1.0)
 
-        # Combine
         state = np.array([
-            s_soc, 
-            t_sin, 
-            t_cos, 
-            t_remaining_norm, 
-            s_grid, 
-            s_volt,
-            s_ev_total,
-            s_ev_delta
+            s_soc, t_sin, t_cos, t_remaining_norm,
+            s_grid, s_volt, s_ev_total, s_ev_delta
         ] + s_prices, dtype=np.float32)
-        
+
         return state
 
     def step(self, action_power, grid_signal, voltage_dev, price_current):
         """
-        Executes one step.
-        Input: action_power (kW) -> Unscaled continuous action from PPO
-        [cite: 10-12]
+        Execute one MDP step.
+
+        Args:
+            action_power  : P_{i,t} (kW) — raw agent output scaled to physical range
+            grid_signal   : λ_grid ∈ [0, 1] — congestion level
+            voltage_dev   : Δv (p.u.) — voltage deviation
+            price_current : electricity price ($/kWh)
+
+        Returns:
+            total_reward (float) : RL reward
+            done         (bool)  : episode finished flag
+            soc          (float) : updated state of charge
+            energy_cost  (float) : economic cost for this step (≥ 0, charging only)
         """
-        # --- 1. Physics & Constraints ---
-        
-        # Get physical limit [cite: 22]
+        # ── 1. Physics & Constraints ──────────────────────────────────────────
         p_max_phys = self._get_max_power(self.soc)
-        
-        # Clip action to physical limits [-Pmax, +Pmax]
-        # (Negative = V2G/Discharge, Positive = Charge)
+
+        # Clip to feasible range; negative = V2G discharge
         p_act = np.clip(action_power, -p_max_phys, p_max_phys)
-        
-        # Calculate Energy Transfer (kWh)
+
+        # Energy transfer (kWh)
         energy_transfer = p_act * self.dt
-        
-        # Update SOC 
-        # SOC_{t+1} = SOC_t + (eta * P * dt) / C
+
+        # Battery dynamics: SOC_{t+1} = SOC_t + (η · P · Δt) / C  [cite: 13]
         delta_soc = (self.eta * energy_transfer) / self.capacity
-        
-        # Check boundaries [0, 1]
-        prev_soc = self.soc
-        self.soc = np.clip(self.soc + delta_soc, 0.0, 1.0)
-        
+        prev_soc  = self.soc
+        self.soc  = np.clip(self.soc + delta_soc, 0.0, 1.0)
         self.current_step += 1
-        
-        # --- 2. Reward Calculation (Scaled for RL Stability) ---
-        # 
-        
-        # A. Continuous Progress Reward (The Carrot)
-        # We reward INCREASING soc if we are below target.
-        # This fixes the "agent does nothing" bug.
-        reward_soc_gain = 0.0
-        if self.soc < self.soc_req:
-            # +5.0 reward for every 10% SOC gained (Scale: ~0 to +1.0 per step)
-            reward_soc_gain = (self.soc - prev_soc) * 50.0 
-            if reward_soc_gain < 0: reward_soc_gain = 0 # Don't reward discharging yet
-            
-        # B. Cost Penalty (The Stick)
-        # Price ~0.15, Energy ~10kWh -> Cost ~1.5. 
-        # We negate it.
-        reward_cost = -(price_current * energy_transfer) * self.w_cost
-        
-        # C. Grid Penalty
-        # If grid_signal is high (congestion), penalize heavy charging
-        reward_grid = -self.w_grid * abs(energy_transfer) * grid_signal
-        
-        # D. Terminal Satisfaction (The Goal)
-        done = False
-        reward_terminal = 0.0
-        
-        if self.current_step >= self.t_dep:
-            done = True
-            
-            if self.soc >= self.soc_req:
-                # Big Bonus for success
-                reward_terminal = 10.0
-            else:
-                # Soft Penalty for failure (Not -10,000!)
-                # Ex: Missing 20% SOC -> 0.2 * 20.0 = -4.0
-                reward_terminal = -self.w_satisfaction * (self.soc_req - self.soc)
 
-        # Total Reward
-        # Expected range per step: -2 to +2
-        # Expected range per episode: -10 to +20
-        total_reward = reward_soc_gain + reward_cost + reward_grid + reward_terminal
-        
-        return total_reward, done, self.soc
+        # ── 2. Economic Cost (tracking metric, separate from reward) ──────────
+        # Only positive transfers (charging) incur real cost;
+        # V2G discharge revenue is conservatively ignored here.
+        energy_cost = max(0.0, energy_transfer) * price_current
 
+        # ── 3. Structured Reward ──────────────────────────────────────────────
+        total_reward, done = compute_reward(
+            soc=self.soc, 
+            prev_soc=prev_soc, 
+            soc_req=self.soc_req, 
+            t_dep=self.t_dep, 
+            current_step=self.current_step,
+            energy_transfer=energy_transfer, 
+            price_current=price_current, 
+            grid_signal=grid_signal,
+            reward_config=self.reward_config
+        )
 
-
-
-
-
+        return total_reward, done, self.soc, energy_cost
 
 
 

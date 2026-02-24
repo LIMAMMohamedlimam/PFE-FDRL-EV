@@ -1,0 +1,16 @@
+# reward.yaml
+# RL Reward function parameters for EVClientEnv
+
+# See REWARD_DESIGN.md for mathematical formulation and rationale.
+
+# Continuous tracking [A, B]
+w_target_tracking: 2.0      # Continuous distance penalty toward SOC target
+w_progress: 5.0             # Positive signal multiplier for SOC gains below target
+
+# Penalties [C, D]
+w_cost: 0.5                 # Energy cost economic penalty
+w_grid: 0.3                 # Grid congestion penalty
+
+# Terminal Goal [E]
+terminal_success_bonus: 15.0      # Fixed bonus awarded if SOC >= soc_target at t_dep
+terminal_failure_weight: 25.0     # Proportional penalty weight for missing SOC target

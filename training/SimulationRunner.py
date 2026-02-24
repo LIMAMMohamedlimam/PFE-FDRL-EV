@@ -6,13 +6,13 @@ from tqdm import tqdm
 from datetime import datetime
 
 # Import your local modules
-from EVClientEnv import EVClientEnv
-from GridEnv import GridEnv
-from EvalMetrics import EvalMetrics
-from DataLoader import DataGenerator
+from env.EVClientEnv import EVClientEnv
+from env.GridEnv import GridEnv
+from utils.EvalMetrics import EvalMetrics
+from utils.DataLoader import DataGenerator
 
 # Import Agents
-from QLearningAgent import QLearningAgent
+from agents.QLearningAgent import QLearningAgent
 # from PPOAgent import PPOAgent  # Uncomment when you have the file
 
 class SimulationRunner:

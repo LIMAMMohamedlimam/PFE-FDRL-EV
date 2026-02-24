@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import json
+import csv
 import os
 
 class EvalMetrics:
@@ -53,6 +54,63 @@ class EvalMetrics:
             return 0.0
         return np.std(self.grid_power_changes)
 
+    # ------------------------------------------------------------------
+    # CSV Persistence
+    # ------------------------------------------------------------------
+
+    def save_csv(self):
+        """
+        Save all per-episode metrics to two CSV files in results/:
+          - {run_name}_episodes.csv  — one row per episode
+          - {run_name}_grid.csv      — one row per timestep (grid loads)
+
+        Call this after training/testing is complete (already called
+        automatically from plot_metrics()).
+        """
+        os.makedirs('results', exist_ok=True)
+
+        # ---- Episode-level CSV ----------------------------------------
+        ep_csv_path = f'results/{self.run_name}_episodes.csv'
+        n_train = len(self.episode_rewards)
+        n_test  = len(self.test_rewards)
+        n_cost  = len(self.episode_costs)
+        n_sat   = len(self.satisfaction_history)
+        n_rows  = max(n_train, n_test, n_cost, n_sat)
+
+        with open(ep_csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'episode',
+                'train_reward',
+                'episode_cost_usd',
+                'satisfaction_soc_ratio',
+                'test_reward',
+            ])
+            for i in range(n_rows):
+                writer.writerow([
+                    i + 1,
+                    self.episode_rewards[i]      if i < n_train else '',
+                    self.episode_costs[i]        if i < n_cost  else '',
+                    self.satisfaction_history[i] if i < n_sat   else '',
+                    self.test_rewards[i]         if i < n_test  else '',
+                ])
+        print(f"-> Data saved to {ep_csv_path}")
+
+        # ---- Timestep-level grid CSV -----------------------------------
+        if self.grid_loads:
+            grid_csv_path = f'results/{self.run_name}_grid.csv'
+            with open(grid_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['timestep', 'grid_load_mw', 'delta_load_mw'])
+                for i, load in enumerate(self.grid_loads):
+                    delta = self.grid_power_changes[i - 1] if i > 0 else ''
+                    writer.writerow([i, load, delta])
+            print(f"-> Grid data saved to {grid_csv_path}")
+
+        return ep_csv_path
+
+    # ------------------------------------------------------------------
+
     def _save_config_to_json(self, filename):
         """
         Saves the run configuration to a central JSON registry.
@@ -60,8 +118,7 @@ class EvalMetrics:
         json_path = 'results/simulation_registry.json'
         
         # Ensure results directory exists
-        if not os.path.exists('results'):
-            os.makedirs('results')
+        os.makedirs('results', exist_ok=True)
 
         # Load existing data
         data = {}
@@ -78,6 +135,8 @@ class EvalMetrics:
             "final_train_reward_avg_5": np.mean(self.episode_rewards[-5:]) if len(self.episode_rewards) >= 5 else 0,
             "final_test_reward": self.test_rewards[-1] if self.test_rewards else 0,
             "grid_stability_sigma": float(self.compute_stability_metric()),
+            "csv_episodes": f"results/{self.run_name}_episodes.csv",
+            "csv_grid": f"results/{self.run_name}_grid.csv" if self.grid_loads else None,
             "timestamp": self.run_name.split('_')[-2] + "_" + self.run_name.split('_')[-1] if "_" in self.run_name else "N/A"
         })
 
@@ -91,7 +150,7 @@ class EvalMetrics:
 
     def plot_metrics(self):
         """
-        Generates plots and saves config to JSON.
+        Generates plots, saves CSV data, and saves config to JSON.
         """
         plt.figure(figsize=(15, 10)) 
         
@@ -125,7 +184,7 @@ class EvalMetrics:
         plt.subplot(2, 3, 4)
         display_steps = min(len(self.grid_loads), 100)
         plt.plot(self.grid_loads[:display_steps], color='purple')
-        plt.title(f'Grid Stability ($\sigma_g$={self.compute_stability_metric():.3f})')
+        plt.title(f'Grid Stability ($\\sigma_g$={self.compute_stability_metric():.3f})')
         plt.xlabel('Time (Steps)')
         plt.ylabel('Load (MW)')
         plt.grid(True)
@@ -142,13 +201,16 @@ class EvalMetrics:
         # Save Image
         filename = f'{self.run_name}.png'
         save_path = f'results/{filename}'
-        if not os.path.exists('results'):
-            os.makedirs('results')
+        os.makedirs('results', exist_ok=True)
             
         plt.savefig(save_path)
         print(f"-> Plot saved to {save_path}")
         
-        # Save Config to JSON
+        # Save CSV data (auto-called here so no call sites need to change)
+        self.save_csv()
+
+        # Save Config to JSON (includes csv_path references)
         self._save_config_to_json(filename)
         
-        plt.show()
+        plt.close()
+        # plt.show()
