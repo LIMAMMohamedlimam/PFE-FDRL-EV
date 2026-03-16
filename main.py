@@ -201,7 +201,7 @@ def run_Q_learning_simulation():
         for agent in agents:
             agent.epsilon = max(simulation_config['epsilon_min'], agent.epsilon * simulation_config['epsilon_decay'])
 
-        if (episode + 1) % 10 == 0:
+        if (episode + 1) % 1000 == 0:
             print(f"  Ep {episode+1} | Reward: {total_episode_reward:.2f} | Cost: ${total_episode_cost:.2f} | Eps: {agents[0].epsilon:.2f}")
 
     # --- 3. TESTING PHASE ---
@@ -315,21 +315,27 @@ def run_PPO_policy_simulation():
     print("--- 1. Initialization of Continuous PPO EV Charging ---")
     
     # --- CONFIGURATION DICTIONARY ---
+    train_cfg = get_config('training')
+    env_cfg = get_config('env')
     simulation_config = {
         "type": "PPO-Continuous",
-        "n_episodes": 300,
-        "n_agents": 10,
-        "simulation_hours": 24,
+        "n_episodes": train_cfg.get('num_episodes', 300),
+        "n_agents": train_cfg.get('num_agents', 10),
+        "simulation_hours": train_cfg.get('simulation_hours', 24),
         "learning_rate": 1e-4,
         "update_timestep": 240,
         "k_epochs": 10,
-        "grid_type": "case33bw",
-        "ev_capacity": 60.0,
-        "ev_max_power": 11.0,
-        "n_test_episodes": 10,
+        "grid_type": train_cfg.get('grid_type', 'case33bw'),
+        "ev_capacity": env_cfg.get('battery_capacity', 60.0),
+        "ev_max_power": env_cfg.get('max_power', 11.0),
+        "n_test_episodes": train_cfg.get('num_test_episodes', 10),
         "reward_weights": {"ramp": 2.0, "track": 1.0, "scale_mw": 0.10}
     }
     
+    
+    
+
+
     # Initialize Run Name
     run_name = f"Continuous_PPO_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
@@ -497,7 +503,7 @@ def run_PPO_policy_simulation():
         metrics.log_episode(total_episode_reward, mode='train')
         metrics.log_cost(total_episode_cost)
         
-        if (episode+1) % 10 == 0:
+        if (episode+1) % 1000 == 0:
             print(f"  Ep {episode+1} | Reward: {total_episode_reward:.2f} | Cost: ${total_episode_cost:.2f}")
 
     # --- 3. TESTING PHASE ---
@@ -597,19 +603,20 @@ def run_PPO_policy_simulation():
 def run_SAC_simulation():
     """Standalone SAC simulation — same structure as PPO."""
     print("--- 1. Initialization of SAC EV Charging ---")
-
+    train_cfg = get_config('training')
+    env_cfg = get_config('env')
     simulation_config = {
         "type": "SAC-Continuous",
-        "n_episodes": 300,
-        "n_agents": 10,
-        "simulation_hours": 24,
+        "n_episodes": train_cfg.get('num_episodes', 300),
+        "n_agents": train_cfg.get('num_agents', 10),
+        "simulation_hours": train_cfg.get('simulation_hours', 24),
         "learning_rate": 3e-4,
         "batch_size": 256,
         "warmup_steps": 500,
-        "grid_type": "case33bw",
-        "ev_capacity": 60.0,
-        "ev_max_power": 11.0,
-        "n_test_episodes": 10,
+        "grid_type": train_cfg.get('grid_type', 'case33bw'),
+        "ev_capacity": env_cfg.get('battery_capacity', 60.0),
+        "ev_max_power": env_cfg.get('max_power', 11.0),
+        "n_test_episodes": train_cfg.get('num_test_episodes', 10),
         "reward_weights": {"ramp": 2.0, "track": 1.0, "scale_mw": 0.10},
     }
 
@@ -717,7 +724,7 @@ def run_SAC_simulation():
         metrics.log_episode(total_episode_reward, mode='train')
         metrics.log_cost(total_episode_cost)
 
-        if (episode + 1) % 10 == 0:
+        if (episode + 1) % 1000 == 0:
             print(f"  Ep {episode+1} | Reward: {total_episode_reward:.2f} | Cost: ${total_episode_cost:.2f}")
 
     # --- TESTING ---
