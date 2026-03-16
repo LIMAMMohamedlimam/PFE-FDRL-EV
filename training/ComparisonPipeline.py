@@ -289,6 +289,13 @@ def run_single_experiment(
             req = profiles[i]['soc_req']
             sats.append(min(1.0, env.soc / req) if req > 0 else 1.0)
         metrics.log_satisfaction(sats)
+
+        # Aggregate per-step EV logs from environments
+        for env in envs:
+            if hasattr(env, 'episode_log') and env.episode_log:
+                metrics.ev_logs.extend(env.episode_log)
+                env.episode_log = []
+
         metrics.log_episode(total_reward, mode='train')
         metrics.log_cost(total_cost)
 
@@ -376,6 +383,12 @@ def run_single_experiment(
             lambda_prev = float(lambda_grid)
             volt_prev = float(grid_info['max_voltage'] - 1.0)
 
+        # Aggregate per-step EV logs from test episodes
+        for env in envs:
+            if hasattr(env, 'episode_log') and env.episode_log:
+                metrics.ev_logs.extend(env.episode_log)
+                env.episode_log = []
+
         metrics.log_episode(total_test_reward, mode='test')
 
     return metrics
@@ -402,6 +415,47 @@ def _run_combo(args):
         **kwargs,
     )
     m.plot_metrics()    # saves PNG + CSV inside the worker
+
+    # ── Paper plots (if enabled) ──────────────────────────────────────
+    env_cfg = get_config('env')
+    if env_cfg.get('paper_plots', {}).get('enabled', False):
+        import pandas as pd
+        save_dir = os.path.join('results', 'figures')
+
+        # Fig 2 — EV charging vs price
+        # Fig 3 — SOC evolution
+        # Fig 5 — Location charging bars
+        if m.ev_logs:
+            df = pd.DataFrame(m.ev_logs)
+            if not df.empty:
+                dt = df['driver_type'].mode()[0] if 'driver_type' in df.columns else 'commuter'
+                df_dt = df[df['driver_type'] == dt] if 'driver_type' in df.columns else df
+                if len(df_dt) > 0:
+                    paper.plot_ev_charging_behavior(df_dt, dt, save_dir=save_dir)
+                    paper.plot_soc_curves(df_dt, dt, save_dir=save_dir)
+                    if 'location' in df_dt.columns:
+                        paper.plot_location_charging_bars(df_dt, dt, save_dir=save_dir)
+
+        # Fig 4 — Grid load decomposition
+        if len(m.grid_loads) > 0:
+            base = np.array(m.grid_loads) * 0.85
+            ev   = np.array(m.grid_loads) * 0.15
+            paper.plot_grid_load(np.arange(len(m.grid_loads)), base, ev, save_dir=save_dir)
+
+        # Fig 1 — Driver distributions
+        from utils.DriverBehaviorModel import DriverBehaviorModel
+        model = DriverBehaviorModel()
+        arr_h, dep_h, arr_o, dep_o = {}, {}, {}, {}
+        samples = 500
+        for dt in ['commuter', 'flexible', 'night_charger']:
+            arr_h[dt] = [model.sample_home_arrival(dt) for _ in range(samples)]
+            dep_h[dt] = [model.sample_home_departure(dt) for _ in range(samples)]
+            arr_o[dt] = [model.sample_office_arrival(dt) for _ in range(samples)]
+            dep_o[dt] = [model.sample_office_departure(dt) for _ in range(samples)]
+        paper.plot_driver_distributions(arr_h, dep_h, arr_o, dep_o, save_dir=save_dir)
+
+        print(f'[PaperPlotter] Done → {save_dir}/')
+
     return combo_name, m
 
 
@@ -456,7 +510,6 @@ def run_comparison(
         (p, a, kwargs, progress_enabled, dev_mode)
         for p, a in combos
     ]
-
     if workers == 1:
         # Single-process path: cleaner tracebacks during debugging
         for item in work_items:

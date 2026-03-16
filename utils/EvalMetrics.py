@@ -30,6 +30,9 @@ class EvalMetrics:
         # 5. User Satisfaction
         self.satisfaction_history = [] 
 
+        # 6. Detailed per-step EV logs (for PaperPlotter)
+        self.ev_logs = []
+
     def log_satisfaction(self, agent_satisfactions):
         avg_sat = np.mean(agent_satisfactions)
         self.satisfaction_history.append(avg_sat)

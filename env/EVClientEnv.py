@@ -402,13 +402,14 @@ class EVClientEnv:
             self.departure_success = (self.soc >= self.soc_req)
 
         # ── 5. Episode log (for visualization) ────────────────────────────
-        if self.driver_behavior_enabled:
-            self.episode_log.append({
-                'hour':           self.current_step - 1,
-                'location':       self.current_location,
-                'charging_power': float(p_act),
-                'soc':            float(self.soc),
-            })
+        self.episode_log.append({
+            'hour':           self.current_step - 1,
+            'location':       self.current_location if self.driver_behavior_enabled else 0,
+            'charging_power': float(p_act),
+            'soc':            float(self.soc),
+            'price':          float(price_current),
+            'driver_type':    self.driver_type if self.driver_type else 'commuter',
+        })
 
         return total_reward, done, self.soc, energy_cost
 
