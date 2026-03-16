@@ -14,3 +14,8 @@ update_every: 1           # Update agent weights every N steps
 # FL Strategies Defaults
 fl_rounds: 300            # Total aggregation rounds (typically 1 round = 1 episode)
 fl_fraction: 1.0          # Fraction of clients participating per round
+
+# Progress Bar Configuration
+progress:
+  enabled: true
+  level: "episode"        # Only "episode" is supported at the pipeline level for now

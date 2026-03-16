@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from tqdm import tqdm
 import os
-import multiprocessing
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Project modules
@@ -108,6 +108,7 @@ def run_single_experiment(
     policy='ppo',
     aggregation='none',       # 'none' | 'fedavg' | 'fedopt'
     verbose=True,
+    progress_enabled=True,
     **extra_cfg,
 ):
     """
@@ -188,7 +189,10 @@ def run_single_experiment(
     # TRAINING
     # ══════════════════════════════════════════════════════════════════
     desc = f"Train {combo_name}"
-    for episode in tqdm(range(n_episodes), desc=desc, disable=not verbose):
+    
+    # We disable tqdm if either verbose is False or if progress_enabled is False
+    show_tqdm = verbose and progress_enabled
+    for episode in tqdm(range(n_episodes), desc=desc, disable=not show_tqdm):
         total_reward = 0.0
         total_cost = 0.0
         grid.reset()
@@ -377,12 +381,13 @@ def _run_combo(args):
     Each worker process instantiates its own agents, envs, and (if available)
     its own CUDA context — so multiple combos run truly in parallel.
     """
-    p, a, kwargs = args
+    p, a, kwargs, progress_enabled = args
     combo_name = f"{p}_{a}"
     m = run_single_experiment(
         policy=p,
         aggregation=a,
         verbose=False,   # suppress per-worker tqdm noise in parallel mode
+        progress_enabled=progress_enabled,
         **kwargs,
     )
     m.plot_metrics()    # saves PNG + CSV inside the worker
@@ -414,12 +419,15 @@ def run_comparison(
     results = {}
     combos = [(p, a) for p in policies for a in aggregations]
     n_combos = len(combos)
-    cpu_count = multiprocessing.cpu_count()
+    cpu_count = mp.cpu_count()
     workers = min(n_combos, cpu_count) if max_workers is None else max_workers
 
     train_cfg = get_config('training')
     n_episodes = train_cfg.get('num_episodes', 300)
     n_test_episodes = train_cfg.get('num_test_episodes', 10)
+    
+    progress_cfg = train_cfg.get('progress', {})
+    progress_enabled = progress_cfg.get('enabled', True)
 
     print(f"\n{'='*60}")
     print(f"  COMPARISON PIPELINE: {n_combos} combinations")
@@ -430,7 +438,7 @@ def run_comparison(
 
     # Build argument list for workers
     work_items = [
-        (p, a, kwargs)
+        (p, a, kwargs, progress_enabled)
         for p, a in combos
     ]
 
@@ -442,17 +450,31 @@ def run_comparison(
             results[combo_name] = m
     else:
         # Multi-process path: true parallelism
-        with ProcessPoolExecutor(max_workers=workers) as pool:
+        # Use spawn context to prevent CUDA poison fork errors
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
             future_map = {pool.submit(_run_combo, item): item[0] + '_' + item[1]
                           for item in work_items}
-            for future in as_completed(future_map):
-                label = future_map[future]
-                try:
-                    combo_name, m = future.result()
-                    print(f"  ✓ Done: {combo_name}")
-                    results[combo_name] = m
-                except Exception as exc:
-                    print(f"  ✗ FAILED: {label} — {exc}")
+            
+            # Use Option B: wrap as_completed with tqdm in the main process
+            with tqdm(total=n_combos, desc="Overall Progress", disable=not progress_enabled) as pbar:
+                for future in as_completed(future_map):
+                    label = future_map[future]
+                    try:
+                        combo_name, m = future.result()
+                        # Use tqdm.write instead of print to not break the bar
+                        if progress_enabled:
+                            tqdm.write(f"  ✓ Done: {combo_name}")
+                        else:
+                            print(f"  ✓ Done: {combo_name}")
+                        results[combo_name] = m
+                    except Exception as exc:
+                        if progress_enabled:
+                            tqdm.write(f"  ✗ FAILED: {label} — {exc}")
+                        else:
+                            print(f"  ✗ FAILED: {label} — {exc}")
+                    finally:
+                        pbar.update(1)
 
     # ── Combined comparison plot ──
     _plot_comparison(results, n_episodes)

@@ -78,7 +78,12 @@ class SimulationRunner:
         """Main Training Loop"""
         print(f"--- Starting Training: {self.cfg['n_episodes']} Episodes ---")
         
-        for episode in tqdm(range(self.cfg['n_episodes']), desc="Training"):
+        from utils.config_loader import get_config
+        train_cfg = get_config('training')
+        progress_cfg = train_cfg.get('progress', {})
+        progress_enabled = progress_cfg.get('enabled', True)
+        
+        for episode in tqdm(range(self.cfg['n_episodes']), desc="Training", disable=not progress_enabled):
             self._run_episode(mode='train', episode_idx=episode)
             
             # Epsilon Decay (Specific to Q-Learning, skipped for PPO)
