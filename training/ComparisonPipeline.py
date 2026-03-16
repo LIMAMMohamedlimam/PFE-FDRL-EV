@@ -207,8 +207,11 @@ def run_single_experiment(
         prev_ev_total_mw = 0.0
 
         for i, env in enumerate(envs):
-            env.soc = profiles[i]['soc_init']
-            env.current_step = 0
+            if env.driver_behavior_enabled:
+                env.reset(initial_soc=profiles[i]['soc_init'])
+            else:
+                env.soc = profiles[i]['soc_init']
+                env.current_step = 0
 
         for hour in range(sim_hours):
             price = DataGenerator.get_iso_ne_price(hour, mode='train')
@@ -328,8 +331,11 @@ def run_single_experiment(
         total_test_reward = 0.0
         grid.reset()
         for env in envs:
-            env.soc = 0.2
-            env.current_step = 0
+            if env.driver_behavior_enabled:
+                env.reset(initial_soc=0.2)
+            else:
+                env.soc = 0.2
+                env.current_step = 0
 
         active = [True] * n_agents
         lambda_prev = 0.0
