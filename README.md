@@ -49,10 +49,12 @@ python app.py
 ```
 pfe_imp/
 ├── configs/               # YAML configuration files (env, sac, reward, training)
+├── data/                  # Real market price datasets (CSV)
+│   └── iso_ne_prices.csv  # 30-day hourly ISO-NE style prices
 ├── env/                   # Environments (GridEnv, EVClientEnv)
 ├── agents/                # RL Agents (Base, PPO, QLearning, SAC)
 ├── training/              # Orchestrators (Pipeline, Servers, Edge, Runners)
-├── utils/                 # Helpers (DataLoader, Metrics, config_loader, rewards)
+├── utils/                 # Helpers (DataLoader, Metrics, config_loader, rewards, MarketPriceLoader)
 ├── main.py                # Entry point — Interactive selector / CLI runner
 ├── app.py                 # Flask web gallery for result visualization
 ├── requirement.txt        # Python dependencies
@@ -133,7 +135,13 @@ The project is driven entirely by YAML configuration files in the `configs/` dir
 - `env.yaml`: EV battery capacity, physics, boundary constraints.
 - `reward.yaml`: Weights for tracking, progress, cost, grid, and terminal penalties.
 - `sac.yaml`: SAC specific hyper parameters (gamma, tau, lr, buffer, entropy).
-- `training.yaml`: Federation loops, episodes, agents, and core runner params.
+- `training.yaml`: Federation loops, episodes, agents, core runner params, **and real-price data toggle**.
+
+### Real vs Synthetic Prices
+
+By default the pipeline uses a synthetic ISO-NE style price generator.  
+To switch to **real market data**, set `use_real_prices: true` in `training.yaml` and point `real_prices_csv` to your CSV file (default: `data/iso_ne_prices.csv`).  
+The CSV must contain columns `timestamp` and `price`. Prices are automatically min-max normalized to [0, 1].
 
 Refer to the [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for deeper details on tuning the system.
 ---
@@ -200,10 +208,11 @@ See [REWARD_DESIGN.md](REWARD_DESIGN.md) for full mathematical formulation.
 - [x] **Federated Aggregation** — FedAvg and FedOpt via `FederatedServer`
 - [x] **FHDP Pipeline** — Edge-level intermediate aggregation via `EdgeAggregator`
 - [x] **Comparison Pipeline** — All 9 combos with comparative plots
+- [x] **Real Price Data** — `MarketPriceLoader` loads real ISO-NE style CSV prices (toggle via `use_real_prices`)
 - [ ] **LoRA Integration** — Freeze base weights, train only low-rank A/B matrices
 - [ ] **SWIFT Scheduling** — Client selection under time-of-stay constraints
 - [ ] **DQN Agent** — Deep Q-Network as alternative to tabular Q-Learning
-- [ ] **Real Data** — Replace synthetic generators with real ISO-NE prices and NHTS profiles
+- [ ] **Real Driver Profiles** — Replace synthetic NHTS profile generator with real NHTS survey data
 
 ---
 

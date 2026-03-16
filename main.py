@@ -21,6 +21,7 @@ from training.FederatedServer import FederatedServer
 from training.EdgeAggregator import EdgeAggregator
 from training.ComparisonPipeline import run_single_experiment, run_comparison
 
+
 def run_Q_learning_simulation():
     print("--- 1. Initialization of Federated EV Charging Simulation (Q-Learning) ---")
 
@@ -761,7 +762,7 @@ def run_SAC_simulation():
     metrics.plot_metrics()
 
 
-def run_federated_simulation():
+def run_federated_simulation(dev_mode=False):
     """Federated training with interactive policy/aggregation selection."""
     policy_choice = questionary.select(
         "Select RL policy:",
@@ -792,9 +793,57 @@ def run_federated_simulation():
         n_test_episodes=10,
         n_agents=10,
         verbose=True,
+        dev_mode=dev_mode,
     )
     m.plot_metrics()
 
+
+# def main():
+#     parser = argparse.ArgumentParser(description="FDRL EV Charging Simulation")
+#     parser.add_argument(
+#         'mode',
+#         type=int,
+#         nargs='?',
+#         help="1=Training, 2=Development"
+#     )
+
+#     args = parser.parse_args()
+
+#     if args.mode is None:
+#         choice = questionary.select(
+#             "Select simulation mode:",
+#             choices=[
+#                 questionary.Choice("PPO Policy Simulation", value=1),
+#                 questionary.Choice("Q-Learning Simulation", value=2),
+#                 questionary.Choice("SAC Policy Simulation", value=3),
+#                 questionary.Choice("Federated Training (select policy + aggregation)", value=4),
+#                 questionary.Choice("Full Comparison Pipeline (all combos)", value=5),
+#             ],
+#             use_arrow_keys=True
+#         ).ask()
+
+#         if choice is None:
+#             sys.exit(0)
+#         args.mode = choice
+
+#     if args.mode == 1:
+#         run_PPO_policy_simulation()
+#     elif args.mode == 2:
+#         run_Q_learning_simulation()
+#     elif args.mode == 3:
+#         run_SAC_simulation()
+#     elif args.mode == 4:
+#         run_federated_simulation()
+#     elif args.mode == 5:
+#         run_comparison()
+#     else:
+#         print(f"Error: {args.mode} is not a valid option. Use 1-5.")
+#         sys.exit(1)
+
+
+import argparse
+import sys
+import questionary
 
 def main():
     parser = argparse.ArgumentParser(description="FDRL EV Charging Simulation")
@@ -802,41 +851,105 @@ def main():
         'mode',
         type=int,
         nargs='?',
-        help="1=PPO, 2=Q-Learning, 3=SAC, 4=Federated, 5=Comparison"
+        help="1=Training, 2=Development"
+    )
+    
+    parser.add_argument(
+        '--simulation',
+        type=int,
+        nargs='?',
+        help="Simulation type (depends on mode)"
     )
 
     args = parser.parse_args()
 
+    # ================= STEP 1: Determine Dev or Train Mode =================
     if args.mode is None:
-        choice = questionary.select(
-            "Select simulation mode:",
+        mode_choice = questionary.select(
+            "Select operation mode:",
             choices=[
-                questionary.Choice("PPO Policy Simulation", value=1),
-                questionary.Choice("Q-Learning Simulation", value=2),
-                questionary.Choice("SAC Policy Simulation", value=3),
-                questionary.Choice("Federated Training (select policy + aggregation)", value=4),
-                questionary.Choice("Full Comparison Pipeline (all combos)", value=5),
+                questionary.Choice("Training Mode", value=1),
+                questionary.Choice("Development Mode", value=2),
             ],
             use_arrow_keys=True
         ).ask()
 
-        if choice is None:
+        if mode_choice is None:
             sys.exit(0)
-        args.mode = choice
+        args.mode = mode_choice
 
-    if args.mode == 1:
-        run_PPO_policy_simulation()
-    elif args.mode == 2:
-        run_Q_learning_simulation()
-    elif args.mode == 3:
-        run_SAC_simulation()
-    elif args.mode == 4:
-        run_federated_simulation()
-    elif args.mode == 5:
-        run_comparison()
-    else:
-        print(f"Error: {args.mode} is not a valid option. Use 1-5.")
+    # Validate mode
+    if args.mode not in [1, 2]:
+        print(f"Error: Mode {args.mode} is invalid. Use 1 (Training) or 2 (Development).")
         sys.exit(1)
+
+    mode_name = "Training" if args.mode == 1 else "Development"
+    print(f"\n✓ Mode selected: {mode_name}\n")
+
+    # ================= STEP 2: Choose Simulation Type Based on Mode =================
+    if args.simulation is None:
+        if args.mode == 1:  # Training Mode
+            sim_choice = questionary.select(
+                "Select training simulation:",
+                choices=[
+                    questionary.Choice("PPO Policy Training", value=1),
+                    questionary.Choice("Q-Learning Training", value=2),
+                    questionary.Choice("SAC Policy Training", value=3),
+                    questionary.Choice("Federated Training (policy + aggregation)", value=4),
+                    questionary.Choice("Full Comparison Pipeline (all combos)", value=5),
+                ],
+                use_arrow_keys=True
+            ).ask()
+        else:  # Development Mode
+            sim_choice = questionary.select(
+                "Select development simulation:",
+                choices=[
+                    questionary.Choice("PPO Policy Training (dev)", value=1),
+                    questionary.Choice("Q-Learning Training (dev)", value=2),
+                    questionary.Choice("SAC Policy Training (dev)", value=3),
+                    questionary.Choice("Federated Training (dev)", value=4),
+                    questionary.Choice("Full Comparison Pipeline (dev)", value=5),
+                ],
+                use_arrow_keys=True
+            ).ask()
+
+        if sim_choice is None:
+            sys.exit(0)
+        args.simulation = sim_choice
+
+    # ================= STEP 3: Execute Selected Simulation =================
+    if args.mode == 1:  # Training Mode
+        if args.simulation == 1:
+            run_PPO_policy_simulation()
+        elif args.simulation == 2:
+            run_Q_learning_simulation()
+        elif args.simulation == 3:
+            run_SAC_simulation()
+        elif args.simulation == 4:
+            run_federated_simulation()
+        elif args.simulation == 5:
+            run_comparison()
+        else:
+            print(f"Error: Simulation {args.simulation} is not valid for Training mode.")
+            sys.exit(1)
+            
+    elif args.mode == 2:  # Development Mode
+        DataGenerator.dev_mode = True
+        if args.simulation == 1:
+            run_PPO_policy_simulation(dev_mode=True)
+        elif args.simulation == 2:
+            run_Q_learning_simulation(dev_mode=True)
+        elif args.simulation == 3:
+            run_SAC_simulation(dev_mode=True)
+        elif args.simulation == 4:
+            run_federated_simulation(dev_mode=True)
+        elif args.simulation == 5:
+            run_comparison(dev_mode=True)
+        else:
+            print(f"Error: Simulation {args.simulation} is not valid for Development mode.")
+            sys.exit(1)
+
+    print("\n✓ Simulation completed successfully!")
 
 
 if __name__ == "__main__":

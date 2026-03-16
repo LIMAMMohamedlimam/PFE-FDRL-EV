@@ -74,12 +74,15 @@ class SimulationRunner:
             'dt': 1.0
         }
 
-    def train(self):
+    def train(self , mode='dev'):
         """Main Training Loop"""
         print(f"--- Starting Training: {self.cfg['n_episodes']} Episodes ---")
         
         from utils.config_loader import get_config
-        train_cfg = get_config('training')
+        if mode == 'dev':
+            train_cfg = get_config('training_dev')
+        else:
+            train_cfg = get_config('training')
         progress_cfg = train_cfg.get('progress', {})
         progress_enabled = progress_cfg.get('enabled', True)
         

@@ -109,6 +109,7 @@ def run_single_experiment(
     aggregation='none',       # 'none' | 'fedavg' | 'fedopt'
     verbose=True,
     progress_enabled=True,
+    dev_mode=False,
     **extra_cfg,
 ):
     """
@@ -118,7 +119,10 @@ def run_single_experiment(
         metrics: EvalMetrics object with all logged data
     """
     # Load configurations
-    train_cfg = get_config('training')
+    if dev_mode:
+        train_cfg = get_config('training_dev')
+    else:
+        train_cfg = get_config('training')
     env_cfg = get_config('env')
     
     n_episodes = train_cfg.get('num_episodes', 300)
@@ -381,13 +385,14 @@ def _run_combo(args):
     Each worker process instantiates its own agents, envs, and (if available)
     its own CUDA context — so multiple combos run truly in parallel.
     """
-    p, a, kwargs, progress_enabled = args
+    p, a, kwargs, progress_enabled, dev_mode = args
     combo_name = f"{p}_{a}"
     m = run_single_experiment(
         policy=p,
         aggregation=a,
         verbose=False,   # suppress per-worker tqdm noise in parallel mode
         progress_enabled=progress_enabled,
+        dev_mode=dev_mode,
         **kwargs,
     )
     m.plot_metrics()    # saves PNG + CSV inside the worker
@@ -398,6 +403,7 @@ def run_comparison(
     policies=('qlearning', 'ppo', 'sac'),
     aggregations=('none', 'fedavg', 'fedopt'),
     max_workers=None,   # None → auto (min(combos, cpu_count))
+    dev_mode=False,
     **kwargs,
 ):
     """
@@ -411,6 +417,7 @@ def run_comparison(
         policies:        Tuple of policy names to test
         aggregations:    Tuple of aggregation strategies to test
         max_workers:     Max parallel workers (default: min(n_combos, cpu_count))
+        dev_mode:        Whether to run in development mode
         **kwargs:        Extra config forwarded to run_single_experiment
 
     Returns:
@@ -421,8 +428,10 @@ def run_comparison(
     n_combos = len(combos)
     cpu_count = mp.cpu_count()
     workers = min(n_combos, cpu_count) if max_workers is None else max_workers
-
-    train_cfg = get_config('training')
+    if dev_mode:
+        train_cfg = get_config('training_dev')
+    else:
+        train_cfg = get_config('training')
     n_episodes = train_cfg.get('num_episodes', 300)
     n_test_episodes = train_cfg.get('num_test_episodes', 10)
     
@@ -438,7 +447,7 @@ def run_comparison(
 
     # Build argument list for workers
     work_items = [
-        (p, a, kwargs, progress_enabled)
+        (p, a, kwargs, progress_enabled, dev_mode)
         for p, a in combos
     ]
 
