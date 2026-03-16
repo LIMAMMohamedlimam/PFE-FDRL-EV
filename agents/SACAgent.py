@@ -143,6 +143,7 @@ class SACAgent(BaseAgent):
         hidden_dim = cfg.get('hidden_dim', 128)
         buffer_capacity = cfg.get('buffer_capacity', 100000)
         self.target_entropy_scale = cfg.get('target_entropy_scale', -0.5)
+        self.update_every = cfg.get('update_every', 1)
 
         # --- Networks (moved to device) ---
         self.actor = GaussianPolicy(input_dim, action_dim, hidden_dim).to(self.device)
