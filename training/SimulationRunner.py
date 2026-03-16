@@ -121,11 +121,15 @@ class SimulationRunner:
         self.grid.reset()
         total_episode_reward = 0
         episode_satisfactions = []
-        
+
         # Reset EVs
         for i, env in enumerate(self.envs):
-            env.soc = self.driver_profiles[i]['soc_init'] if mode=='train' else 0.2
-            env.current_step = 0
+            if env.driver_behavior_enabled:
+                init_soc = self.driver_profiles[i]['soc_init'] if mode == 'train' else 0.2
+                env.reset(initial_soc=init_soc)
+            else:
+                env.soc = self.driver_profiles[i]['soc_init'] if mode == 'train' else 0.2
+                env.current_step = 0
             
         # --- Daily Cycle Loop ---
         for hour in range(self.cfg['sim_hours']):
@@ -168,7 +172,7 @@ class SimulationRunner:
                 a_idx, p_kw = actions[i]
                 
                 # Execute Action & Get Reward
-                r_t, done, new_soc = self.envs[i].step(
+                r_t, done, new_soc, _ = self.envs[i].step(
                     action_power=p_kw,
                     grid_signal=lambda_grid,
                     voltage_dev=grid_info['max_voltage'] - 1.0,
@@ -220,4 +224,13 @@ class SimulationRunner:
             final = env.soc
             ratio = min(1.0, final / req) if req > 0 else 1.0
             sats.append(ratio)
+
+        # Log driver type and departure success when driver behavior is active
+        if self.envs and self.envs[0].driver_behavior_enabled:
+            for env in self.envs:
+                if hasattr(self.metrics, 'driver_type_log'):
+                    self.metrics.driver_type_log.append(env.driver_type)
+                if hasattr(self.metrics, 'departure_success_log'):
+                    self.metrics.departure_success_log.append(env.departure_success)
+
         self.metrics.log_satisfaction(sats)
