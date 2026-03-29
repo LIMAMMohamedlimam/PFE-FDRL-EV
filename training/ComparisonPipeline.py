@@ -270,6 +270,7 @@ def run_single_experiment(
                     continue
                 raw, p_kw = actions[i]
                 r_t, done, _, energy_cost = envs[i].step(p_kw, lambda_grid, grid_info['max_voltage'] - 1.0, price)
+                # print(f"  [Debug] Agent {i} | Action: {p_kw:.2f} kW | Reward: {r_t:.2f} | Cost: ${energy_cost:.2f} | Penalty: {shared_penalty:.2f}")
                 total_cost += energy_cost
                 r_t += shared_penalty
                 s_next = envs[i].get_state(lambda_grid, grid_info['max_voltage'] - 1.0, price_forecast)
@@ -297,6 +298,7 @@ def run_single_experiment(
                 env.episode_log = []
 
         metrics.log_episode(total_reward, mode='train')
+        # print(f"Episode {episode+1}/{n_episodes} | Total Reward: {total_reward:.2f} | Total Cost: ${total_cost:.2f}")
         metrics.log_cost(total_cost)
 
         # Epsilon decay (Q-Learning)

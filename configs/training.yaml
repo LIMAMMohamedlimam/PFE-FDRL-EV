@@ -2,8 +2,8 @@
 # High-level training, simulation registry, and pipeline configurations
 
 # Simulation Run
-num_episodes: 3000         # Number of training episodes per agent/combo
-num_test_episodes: 300     # Number of test episodes per agent/combo
+num_episodes: 1000        # Number of training episodes per agent/combo
+num_test_episodes: 100     # Number of test episodes per agent/combo
 simulation_hours: 24      # Episode length in hours
 num_agents: 20            # Number of EVs in the simulation
 grid_type: "case33bw"     # pandapower grid topology

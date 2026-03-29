@@ -22,11 +22,13 @@ from training.EdgeAggregator import EdgeAggregator
 from training.ComparisonPipeline import run_single_experiment, run_comparison
 
 
-def run_Q_learning_simulation():
+def run_Q_learning_simulation(dev_mode=False):
     print("--- 1. Initialization of Federated EV Charging Simulation (Q-Learning) ---")
-
+    if dev_mode:
+        train_cfg = get_config('training_dev')
+    else:
+        train_cfg = get_config('training')
     # --- CONFIGURATION DICTIONARY ---
-    train_cfg = get_config('training')
     env_cfg = get_config('env')
     simulation_config = {
         "type": "Q-Learning",
@@ -156,7 +158,7 @@ def run_Q_learning_simulation():
                     continue
 
                 a_idx, p_kw = actions[i]
-
+                # print(f"price={price:.2f}, p_kw={p_kw:.2f}, lambda={lambda_grid:.4f}, volt_dev={grid_info['max_voltage'] - 1.0:.4f}")
                 r_t, done, _, energy_cost = envs[i].step(
                     action_power=p_kw,
                     grid_signal=lambda_grid,
@@ -164,6 +166,8 @@ def run_Q_learning_simulation():
                     price_current=price
                 )
                 total_episode_cost += energy_cost
+                
+                print(f"Price: ${price:.2f} | Energy Cost: ${energy_cost:.2f} | total_cost: ${total_episode_cost:.2f} ")
 
                 s_next = envs[i].get_state(
                     grid_signal=lambda_grid,

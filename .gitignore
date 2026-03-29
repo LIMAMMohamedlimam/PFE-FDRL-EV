@@ -3,3 +3,7 @@ results/
 venv/
 *.pyc
 data/
+test*/
+final*/
+impo*/
+plots*/

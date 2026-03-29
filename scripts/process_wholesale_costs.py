@@ -8,7 +8,7 @@ from pathlib import Path
 # Set the directory containing the input CSV files
 INPUT_DIR = "./data/iso_new_england_hourly_wholesale_load_cost/" 
 # Set the name of the final output file
-OUTPUT_FILE = "./iso_ne_prices.csv"
+OUTPUT_FILE = "./iso_ne_prices_testing.csv"
 # =================================================
 
 REQUIRED_COLUMNS = ["Local Date", "Local Hour", "Total Cost"]
