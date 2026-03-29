@@ -9,6 +9,10 @@ import random
 from agents.BaseAgent import BaseAgent
 from utils.device_utils import get_device, device_info
 from utils.config_loader import get_config
+from utils.lora import (
+    apply_lora, get_lora_parameters, get_lora_state_dict,
+    load_lora_state_dict, get_lora_config, count_parameters,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -125,12 +129,23 @@ class SACAgent(BaseAgent):
 
     GPU: Networks and tensors are automatically placed on the best available
     device (CUDA → MPS → CPU) via device_utils.get_device().
+
+    LoRA: When use_lora=True, base network weights are frozen and only
+    low-rank adapter matrices are trainable. This reduces the number of
+    trainable parameters and communication cost in federated learning.
     """
 
-    def __init__(self, input_dim, action_dim=1, alpha_init=0.2, **kwargs):
+    def __init__(self, input_dim, action_dim=1, alpha_init=0.2, use_lora=False, **kwargs):
         # --- Device ---
         self.device = get_device()
         self.action_dim = action_dim
+
+        # --- LoRA flag: constructor arg > env var > yaml ---
+        self.use_lora = use_lora
+        if not self.use_lora:
+            lora_cfg = get_lora_config()
+            self.use_lora = lora_cfg.get('enabled', False)
+        self._lora_cfg = get_lora_config() if self.use_lora else {}
 
         # --- Load Configs ---
         cfg = get_config('sac')
@@ -151,9 +166,37 @@ class SACAgent(BaseAgent):
         self.critic_target = TwinQNetwork(input_dim, action_dim, hidden_dim).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
+        # --- Apply LoRA if enabled ---
+        if self.use_lora:
+            lora_rank = self._lora_cfg.get('rank', 4)
+            lora_alpha = self._lora_cfg.get('alpha', 8)
+            lora_targets = self._lora_cfg.get('target_modules', [])
+
+            apply_lora(self.actor, rank=lora_rank, alpha=lora_alpha, target_modules=lora_targets)
+            apply_lora(self.critic, rank=lora_rank, alpha=lora_alpha, target_modules=lora_targets)
+            # Target critic must mirror the LoRA structure
+            apply_lora(self.critic_target, rank=lora_rank, alpha=lora_alpha, target_modules=lora_targets)
+            self.critic_target.load_state_dict(self.critic.state_dict())
+
+            # Move LoRA layers to device (they were built on CPU from base weights)
+            self.actor = self.actor.to(self.device)
+            self.critic = self.critic.to(self.device)
+            self.critic_target = self.critic_target.to(self.device)
+
+            actor_trainable = count_parameters(self.actor, trainable_only=True)
+            critic_trainable = count_parameters(self.critic, trainable_only=True)
+            print(f"[SAC] LoRA ENABLED  (rank={lora_rank}, α={lora_alpha})")
+            print(f"      Actor  trainable params: {actor_trainable:,}")
+            print(f"      Critic trainable params: {critic_trainable:,}")
+
         # --- Optimisers ---
-        self.actor_optim = optim.Adam(self.actor.parameters(), lr=lr)
-        self.critic_optim = optim.Adam(self.critic.parameters(), lr=lr)
+        # When LoRA is active, only optimize LoRA parameters
+        if self.use_lora:
+            self.actor_optim = optim.Adam(get_lora_parameters(self.actor), lr=lr)
+            self.critic_optim = optim.Adam(get_lora_parameters(self.critic), lr=lr)
+        else:
+            self.actor_optim = optim.Adam(self.actor.parameters(), lr=lr)
+            self.critic_optim = optim.Adam(self.critic.parameters(), lr=lr)
 
         # --- Automatic entropy tuning (log_alpha on device) ---
         self.target_entropy = self.target_entropy_scale * float(action_dim)
@@ -192,33 +235,56 @@ class SACAgent(BaseAgent):
         self._learn()
 
     def get_parameters(self):
-        """Return actor + critic state dicts as numpy (for FL aggregation).
+        """Return model state dicts as numpy (for FL aggregation).
 
+        When LoRA is active, returns ONLY the LoRA adapter weights,
+        reducing communication cost in federated learning.
         Always uses .cpu() so FL aggregation (numpy) works regardless of device.
         """
-        params = {}
-        for k, v in self.actor.state_dict().items():
-            params[f"actor.{k}"] = v.cpu().numpy()
-        for k, v in self.critic.state_dict().items():
-            params[f"critic.{k}"] = v.cpu().numpy()
-        return params
+        if self.use_lora:
+            # Return only LoRA weights with actor./critic. prefixes
+            params = {}
+            params.update(get_lora_state_dict(self.actor, prefix='actor.'))
+            params.update(get_lora_state_dict(self.critic, prefix='critic.'))
+            return params
+        else:
+            params = {}
+            for k, v in self.actor.state_dict().items():
+                params[f"actor.{k}"] = v.cpu().numpy()
+            for k, v in self.critic.state_dict().items():
+                params[f"critic.{k}"] = v.cpu().numpy()
+            return params
 
     def set_parameters(self, parameters):
-        """Load aggregated parameters (for FL aggregation)."""
-        actor_sd = {}
-        critic_sd = {}
-        for k, v in parameters.items():
-            tensor = torch.from_numpy(v).to(self.device) if isinstance(v, np.ndarray) else v.to(self.device)
-            if k.startswith("actor."):
-                actor_sd[k[len("actor."):]] = tensor
-            elif k.startswith("critic."):
-                critic_sd[k[len("critic."):]] = tensor
+        """Load aggregated parameters (for FL aggregation).
 
-        if actor_sd:
-            self.actor.load_state_dict(actor_sd)
-        if critic_sd:
-            self.critic.load_state_dict(critic_sd)
-            self.critic_target.load_state_dict(critic_sd)
+        When LoRA is active, loads ONLY LoRA adapter weights.
+        """
+        if self.use_lora:
+            # Split by prefix and load LoRA weights
+            actor_params = {k: v for k, v in parameters.items() if k.startswith('actor.')}
+            critic_params = {k: v for k, v in parameters.items() if k.startswith('critic.')}
+
+            if actor_params:
+                load_lora_state_dict(self.actor, actor_params, prefix='actor.', device=self.device)
+            if critic_params:
+                load_lora_state_dict(self.critic, critic_params, prefix='critic.', device=self.device)
+                load_lora_state_dict(self.critic_target, critic_params, prefix='critic.', device=self.device)
+        else:
+            actor_sd = {}
+            critic_sd = {}
+            for k, v in parameters.items():
+                tensor = torch.from_numpy(v).to(self.device) if isinstance(v, np.ndarray) else v.to(self.device)
+                if k.startswith("actor."):
+                    actor_sd[k[len("actor."):]] = tensor
+                elif k.startswith("critic."):
+                    critic_sd[k[len("critic."):]] = tensor
+
+            if actor_sd:
+                self.actor.load_state_dict(actor_sd)
+            if critic_sd:
+                self.critic.load_state_dict(critic_sd)
+                self.critic_target.load_state_dict(critic_sd)
 
     # ----- Internal SAC learning -----
 

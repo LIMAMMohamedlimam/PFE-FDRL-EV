@@ -773,6 +773,380 @@ def run_SAC_simulation():
     metrics.plot_metrics()
 
 
+def run_SAC_lora_simulation(dev_mode=False):
+    """SAC simulation with LoRA enabled — same structure as run_SAC_simulation."""
+    print("--- 1. Initialization of SAC + LoRA EV Charging ---")
+    print("[LoRA mode: ENABLED]")
+    if dev_mode:
+        train_cfg = get_config('training_dev')
+    else:
+        train_cfg = get_config('training')
+    env_cfg = get_config('env')
+    simulation_config = {
+        "type": "SAC-LoRA",
+        "n_episodes": train_cfg.get('num_episodes', 300),
+        "n_agents": train_cfg.get('num_agents', 10),
+        "simulation_hours": train_cfg.get('simulation_hours', 24),
+        "learning_rate": 3e-4,
+        "batch_size": 256,
+        "warmup_steps": 500,
+        "grid_type": train_cfg.get('grid_type', 'case33bw'),
+        "ev_capacity": env_cfg.get('battery_capacity', 60.0),
+        "ev_max_power": env_cfg.get('max_power', 11.0),
+        "n_test_episodes": train_cfg.get('num_test_episodes', 10),
+        "reward_weights": {"ramp": 2.0, "track": 1.0, "scale_mw": 0.10},
+        "use_lora": True,
+    }
+
+    run_name = f"SAC_LoRA_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    metrics = EvalMetrics(run_name=run_name, config=simulation_config)
+    grid = GridEnv(network_type=simulation_config['grid_type'])
+    driver_profiles = DataGenerator.get_nhts_profile(simulation_config['n_agents'])
+    agent_bus_map = {i: (i % 30) + 2 for i in range(simulation_config['n_agents'])}
+
+    dummy_env = EVClientEnv({'capacity': 60.0, 'max_power': 11.0, 'initial_soc': 0.5,
+                             'soc_req': 0.8, 't_dep': 10, 'dt': 1.0})
+    dummy_state = dummy_env.get_state(0.0, 0.0, [0.1] * 5)
+    input_dim = len(dummy_state)
+
+    agents, envs = [], []
+    for i in range(simulation_config['n_agents']):
+        config = {
+            'capacity': simulation_config['ev_capacity'],
+            'max_power': simulation_config['ev_max_power'],
+            'initial_soc': driver_profiles[i]['soc_init'],
+            'soc_req': driver_profiles[i]['soc_req'],
+            't_dep': driver_profiles[i]['duration'],
+            'dt': 1.0,
+        }
+        envs.append(EVClientEnv(config))
+        agents.append(SACAgent(
+            input_dim=input_dim, action_dim=1,
+            use_lora=True,  # ← LoRA enabled
+        ))
+
+    # --- TRAINING (identical loop to run_SAC_simulation) ---
+    print(f"--- 2. Starting Training ({simulation_config['n_episodes']} Episodes) ---")
+    for episode in tqdm(range(simulation_config['n_episodes']), desc="Training SAC+LoRA"):
+        total_episode_reward = 0.0
+        total_episode_cost = 0.0
+        grid.reset()
+
+        active = [True] * simulation_config['n_agents']
+        lambda_prev, volt_prev, prev_ev_total_mw = 0.0, 0.0, 0.0
+
+        for i, env in enumerate(envs):
+            env.soc = driver_profiles[i]['soc_init']
+            env.current_step = 0
+
+        for hour in range(simulation_config['simulation_hours']):
+            price = DataGenerator.get_iso_ne_price(hour, mode='train')
+            price_forecast = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='train') for h in range(5)]
+            base_load_mw = np.random.normal(3.5, 0.2)
+
+            p_target_kw, n_active = 0.0, 0
+            for i, env in enumerate(envs):
+                if not active[i]: continue
+                n_active += 1
+                soc_gap = max(0.0, env.soc_req - env.soc)
+                e_gap = (soc_gap * env.capacity) / env.eta
+                t_left = max(1, env.t_dep - env.current_step)
+                p_target_kw += min(e_gap / t_left, env._get_max_power(env.soc))
+            p_target_mw = p_target_kw / 1000.0
+
+            current_states, actions, grid_injections_mw = {}, {}, {}
+
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                s_t = envs[i].get_state(lambda_prev, volt_prev, price_forecast)
+                current_states[i] = s_t
+                raw_action = agent.get_action(s_t, eval_mode=False)
+                p_max_phys = envs[i]._get_max_power(envs[i].soc)
+                p_kw = raw_action * p_max_phys
+                actions[i] = (raw_action, p_kw)
+                bus = agent_bus_map[i]
+                grid_injections_mw[bus] = grid_injections_mw.get(bus, 0.0) + (p_kw / 1000.0)
+
+            lambda_grid, grid_info = grid.step(grid_injections_mw, base_load_mw)
+            ev_total_mw = float(sum(grid_injections_mw.values()))
+            delta_ev_mw = ev_total_mw - prev_ev_total_mw
+
+            SCALE_MW = simulation_config['reward_weights']['scale_mw']
+            r_ramp = -simulation_config['reward_weights']['ramp'] * (delta_ev_mw / SCALE_MW) ** 2
+            r_track = -simulation_config['reward_weights']['track'] * ((ev_total_mw - p_target_mw) / SCALE_MW) ** 2
+            shared_penalty = (r_ramp + r_track) / max(1, n_active)
+
+            prev_ev_total_mw = ev_total_mw
+            lambda_prev = float(lambda_grid)
+            volt_prev = float(grid_info['max_voltage'] - 1.0)
+            metrics.log_step(base_load_mw + sum(grid_injections_mw.values()))
+
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                raw_action, p_kw = actions[i]
+                r_t, done, _, energy_cost = envs[i].step(p_kw, lambda_grid, grid_info['max_voltage'] - 1.0, price)
+                total_episode_cost += energy_cost
+                r_t += shared_penalty
+                s_next = envs[i].get_state(lambda_grid, grid_info['max_voltage'] - 1.0, price_forecast)
+                agent.update(current_states[i], raw_action, r_t, s_next, done=done)
+                total_episode_reward += r_t
+                if done:
+                    active[i] = False
+
+        sats = [min(1.0, envs[i].soc / driver_profiles[i]['soc_req'])
+                if driver_profiles[i]['soc_req'] > 0 else 1.0
+                for i in range(simulation_config['n_agents'])]
+        metrics.log_satisfaction(sats)
+        metrics.log_episode(total_episode_reward, mode='train')
+        metrics.log_cost(total_episode_cost)
+
+    # --- TESTING ---
+    print("--- 3. Evaluation (SAC+LoRA Continuous) ---")
+    N_TEST = simulation_config['n_test_episodes']
+    for test_ep in range(N_TEST):
+        total_test_reward = 0.0
+        grid.reset()
+        for env in envs:
+            env.soc = 0.2; env.current_step = 0
+        active = [True] * simulation_config['n_agents']
+        lambda_prev, volt_prev, prev_ev_total_mw = 0.0, 0.0, 0.0
+
+        for hour in range(simulation_config['simulation_hours']):
+            price_test = DataGenerator.get_iso_ne_price(hour, mode='test')
+            pf_test = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='test') for h in range(5)]
+            base_load_test = np.random.normal(3.8, 0.3)
+            grid_inj, actions = {}, {}
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                s_t = envs[i].get_state(lambda_prev, volt_prev, pf_test)
+                raw = agent.get_action(s_t, eval_mode=True)
+                p_kw = raw * envs[i]._get_max_power(envs[i].soc)
+                actions[i] = (raw, p_kw)
+                bus = agent_bus_map[i]
+                grid_inj[bus] = grid_inj.get(bus, 0.0) + (p_kw / 1000.0)
+            l_g, g_i = grid.step(grid_inj, base_load_test)
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                _, p_kw = actions[i]
+                r_t, done, _, _ = envs[i].step(p_kw, l_g, g_i['max_voltage'] - 1.0, price_test)
+                total_test_reward += r_t
+                if done: active[i] = False
+            prev_ev_total_mw = float(sum(grid_inj.values()))
+            lambda_prev = float(l_g)
+            volt_prev = float(g_i['max_voltage'] - 1.0)
+        metrics.log_episode(total_test_reward, mode='test')
+        print(f"  TestEp {test_ep+1}/{N_TEST} | Reward: {total_test_reward:.2f}")
+
+    print(f"\nGrid Stability (sigma_g): {metrics.compute_stability_metric():.4f} MW")
+    metrics.plot_metrics()
+
+
+def run_PPO_lora_simulation(dev_mode=False):
+    """PPO simulation with LoRA enabled — same structure as run_PPO_policy_simulation."""
+    print("--- 1. Initialization of PPO + LoRA EV Charging ---")
+    print("[LoRA mode: ENABLED]")
+    if dev_mode:
+        train_cfg = get_config('training_dev')
+    else:
+        train_cfg = get_config('training')
+    env_cfg = get_config('env')
+    simulation_config = {
+        "type": "PPO-LoRA",
+        "n_episodes": train_cfg.get('num_episodes', 300),
+        "n_agents": train_cfg.get('num_agents', 10),
+        "simulation_hours": train_cfg.get('simulation_hours', 24),
+        "learning_rate": 1e-4,
+        "update_timestep": 240,
+        "k_epochs": 10,
+        "grid_type": train_cfg.get('grid_type', 'case33bw'),
+        "ev_capacity": env_cfg.get('battery_capacity', 60.0),
+        "ev_max_power": env_cfg.get('max_power', 11.0),
+        "n_test_episodes": train_cfg.get('num_test_episodes', 10),
+        "reward_weights": {"ramp": 2.0, "track": 1.0, "scale_mw": 0.10},
+        "use_lora": True,
+    }
+
+    run_name = f"PPO_LoRA_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    metrics = EvalMetrics(run_name=run_name, config=simulation_config)
+    grid = GridEnv(network_type=simulation_config['grid_type'])
+    driver_profiles = DataGenerator.get_nhts_profile(simulation_config['n_agents'])
+    agent_bus_map = {i: (i % 30) + 2 for i in range(simulation_config['n_agents'])}
+
+    dummy_env = EVClientEnv({'capacity': 60.0, 'max_power': 11.0, 'initial_soc': 0.5,
+                             'soc_req': 0.8, 't_dep': 10, 'dt': 1.0})
+    dummy_state = dummy_env.get_state(0.0, 0.0, [0.1] * 5)
+    input_dim = len(dummy_state)
+
+    agents, envs = [], []
+    for i in range(simulation_config['n_agents']):
+        config = {
+            'capacity': simulation_config['ev_capacity'],
+            'max_power': simulation_config['ev_max_power'],
+            'initial_soc': driver_profiles[i]['soc_init'],
+            'soc_req': driver_profiles[i]['soc_req'],
+            't_dep': driver_profiles[i]['duration'],
+            'dt': 1.0,
+        }
+        envs.append(EVClientEnv(config))
+        agents.append(PPOAgent(
+            input_dim=input_dim,
+            action_dim=1,
+            lr=simulation_config['learning_rate'],
+            update_timestep=simulation_config['update_timestep'],
+            K_epochs=simulation_config['k_epochs'],
+            use_lora=True,  # ← LoRA enabled
+        ))
+
+    # --- TRAINING ---
+    print(f"--- 2. Starting Training ({simulation_config['n_episodes']} Episodes) ---")
+    for episode in tqdm(range(simulation_config['n_episodes']), desc="Training PPO+LoRA"):
+        total_episode_reward = 0.0
+        total_episode_cost = 0.0
+        grid.reset()
+
+        active = [True] * simulation_config['n_agents']
+        lambda_prev, volt_prev, prev_ev_total_mw = 0.0, 0.0, 0.0
+
+        for i, env in enumerate(envs):
+            env.soc = driver_profiles[i]['soc_init']
+            env.current_step = 0
+
+        for hour in range(simulation_config['simulation_hours']):
+            price = DataGenerator.get_iso_ne_price(hour, mode='train')
+            price_forecast = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='train') for h in range(5)]
+            base_load_mw = np.random.normal(3.5, 0.2)
+
+            p_target_kw, n_active = 0.0, 0
+            for i, env in enumerate(envs):
+                if not active[i]: continue
+                n_active += 1
+                soc_gap = max(0.0, env.soc_req - env.soc)
+                e_gap = (soc_gap * env.capacity) / env.eta
+                t_left = max(1, env.t_dep - env.current_step)
+                p_target_kw += min(e_gap / t_left, env._get_max_power(env.soc))
+            p_target_mw = p_target_kw / 1000.0
+
+            current_states, actions, grid_injections_mw = {}, {}, {}
+
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                s_t = envs[i].get_state(lambda_prev, volt_prev, price_forecast)
+                current_states[i] = s_t
+                raw_action = agent.get_action(s_t, eval_mode=False)
+                p_max_phys = envs[i]._get_max_power(envs[i].soc)
+                p_kw = raw_action * p_max_phys
+                actions[i] = (raw_action, p_kw)
+                bus = agent_bus_map[i]
+                grid_injections_mw[bus] = grid_injections_mw.get(bus, 0.0) + (p_kw / 1000.0)
+
+            lambda_grid, grid_info = grid.step(grid_injections_mw, base_load_mw)
+            ev_total_mw = float(sum(grid_injections_mw.values()))
+            delta_ev_mw = ev_total_mw - prev_ev_total_mw
+
+            SCALE_MW = simulation_config['reward_weights']['scale_mw']
+            r_ramp = -simulation_config['reward_weights']['ramp'] * (delta_ev_mw / SCALE_MW) ** 2
+            r_track = -simulation_config['reward_weights']['track'] * ((ev_total_mw - p_target_mw) / SCALE_MW) ** 2
+            shared_penalty = (r_ramp + r_track) / max(1, n_active)
+
+            prev_ev_total_mw = ev_total_mw
+            lambda_prev = float(lambda_grid)
+            volt_prev = float(grid_info['max_voltage'] - 1.0)
+            metrics.log_step(base_load_mw + sum(grid_injections_mw.values()))
+
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                raw_action, p_kw = actions[i]
+                r_t, done, _, energy_cost = envs[i].step(p_kw, lambda_grid, grid_info['max_voltage'] - 1.0, price)
+                total_episode_cost += energy_cost
+                r_t += shared_penalty
+                s_next = envs[i].get_state(lambda_grid, grid_info['max_voltage'] - 1.0, price_forecast)
+                agent.update(current_states[i], raw_action, r_t, s_next, done=done)
+                total_episode_reward += r_t
+                if done:
+                    active[i] = False
+
+        sats = [min(1.0, envs[i].soc / driver_profiles[i]['soc_req'])
+                if driver_profiles[i]['soc_req'] > 0 else 1.0
+                for i in range(simulation_config['n_agents'])]
+        metrics.log_satisfaction(sats)
+        metrics.log_episode(total_episode_reward, mode='train')
+        metrics.log_cost(total_episode_cost)
+
+    # --- TESTING ---
+    print("--- 3. Evaluation (PPO+LoRA Continuous) ---")
+    N_TEST = simulation_config['n_test_episodes']
+    for test_ep in range(N_TEST):
+        total_test_reward = 0.0
+        grid.reset()
+        for env in envs:
+            env.soc = 0.2; env.current_step = 0
+        active = [True] * simulation_config['n_agents']
+        lambda_prev, volt_prev, prev_ev_total_mw = 0.0, 0.0, 0.0
+
+        for hour in range(simulation_config['simulation_hours']):
+            price_test = DataGenerator.get_iso_ne_price(hour, mode='test')
+            pf_test = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='test') for h in range(5)]
+            base_load_test = np.random.normal(3.8, 0.3)
+            grid_inj, actions = {}, {}
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                s_t = envs[i].get_state(lambda_prev, volt_prev, pf_test)
+                raw = agent.get_action(s_t, eval_mode=True)
+                p_kw = raw * envs[i]._get_max_power(envs[i].soc)
+                actions[i] = (raw, p_kw)
+                bus = agent_bus_map[i]
+                grid_inj[bus] = grid_inj.get(bus, 0.0) + (p_kw / 1000.0)
+            l_g, g_i = grid.step(grid_inj, base_load_test)
+            for i, agent in enumerate(agents):
+                if not active[i]: continue
+                _, p_kw = actions[i]
+                r_t, done, _, _ = envs[i].step(p_kw, l_g, g_i['max_voltage'] - 1.0, price_test)
+                total_test_reward += r_t
+                if done: active[i] = False
+            prev_ev_total_mw = float(sum(grid_inj.values()))
+            lambda_prev = float(l_g)
+            volt_prev = float(g_i['max_voltage'] - 1.0)
+        metrics.log_episode(total_test_reward, mode='test')
+        print(f"  TestEp {test_ep+1}/{N_TEST} | Reward: {total_test_reward:.2f}")
+
+    print(f"\nGrid Stability (sigma_g): {metrics.compute_stability_metric():.4f} MW")
+    metrics.plot_metrics()
+
+
+def run_federated_lora_simulation(dev_mode=False):
+    """Federated training with LoRA enabled — interactive policy/aggregation selection."""
+    print("[LoRA mode: ENABLED for Federated Training]")
+    policy_choice = questionary.select(
+        "Select RL policy (LoRA-enabled):",
+        choices=[
+            questionary.Choice("PPO + LoRA", value='ppo'),
+            questionary.Choice("SAC + LoRA", value='sac'),
+        ]
+    ).ask()
+    if policy_choice is None:
+        sys.exit(0)
+
+    agg_choice = questionary.select(
+        "Select aggregation strategy:",
+        choices=[
+            questionary.Choice("FedAvg", value='fedavg'),
+            questionary.Choice("FedOpt (server momentum)", value='fedopt'),
+        ]
+    ).ask()
+    if agg_choice is None:
+        sys.exit(0)
+
+    print(f"\n>>> Running Federated + LoRA: {policy_choice} + {agg_choice}")
+    m = run_single_experiment(
+        policy=policy_choice,
+        aggregation=agg_choice,
+        verbose=True,
+        dev_mode=dev_mode,
+        use_lora=True,  # ← LoRA enabled for federated training
+    )
+    m.plot_metrics()
+
+
 def run_federated_simulation(dev_mode=False):
     """Federated training with interactive policy/aggregation selection."""
     policy_choice = questionary.select(
@@ -908,6 +1282,9 @@ def main():
                     questionary.Choice("SAC Policy Training", value=3),
                     questionary.Choice("Federated Training (policy + aggregation)", value=4),
                     questionary.Choice("Full Comparison Pipeline (all combos)", value=5),
+                    questionary.Choice("SAC + LoRA Training", value=6),
+                    questionary.Choice("PPO + LoRA Training", value=7),
+                    questionary.Choice("Federated Training + LoRA", value=8),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -920,6 +1297,9 @@ def main():
                     questionary.Choice("SAC Policy Training (dev)", value=3),
                     questionary.Choice("Federated Training (dev)", value=4),
                     questionary.Choice("Full Comparison Pipeline (dev)", value=5),
+                    questionary.Choice("SAC + LoRA Training (dev)", value=6),
+                    questionary.Choice("PPO + LoRA Training (dev)", value=7),
+                    questionary.Choice("Federated Training + LoRA (dev)", value=8),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -940,6 +1320,12 @@ def main():
             run_federated_simulation()
         elif args.simulation == 5:
             run_comparison()
+        elif args.simulation == 6:
+            run_SAC_lora_simulation()
+        elif args.simulation == 7:
+            run_PPO_lora_simulation()
+        elif args.simulation == 8:
+            run_federated_lora_simulation()
         else:
             print(f"Error: Simulation {args.simulation} is not valid for Training mode.")
             sys.exit(1)
@@ -956,6 +1342,12 @@ def main():
             run_federated_simulation(dev_mode=True)
         elif args.simulation == 5:
             run_comparison(dev_mode=True)
+        elif args.simulation == 6:
+            run_SAC_lora_simulation(dev_mode=True)
+        elif args.simulation == 7:
+            run_PPO_lora_simulation(dev_mode=True)
+        elif args.simulation == 8:
+            run_federated_lora_simulation(dev_mode=True)
         else:
             print(f"Error: Simulation {args.simulation} is not valid for Development mode.")
             sys.exit(1)

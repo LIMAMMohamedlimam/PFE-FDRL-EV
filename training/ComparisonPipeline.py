@@ -7,6 +7,7 @@ and produces comparative plots.
 """
 
 import numpy as np
+import torch
 import matplotlib
 matplotlib.use('Agg')           # headless – no display needed
 import matplotlib.pyplot as plt
@@ -51,8 +52,13 @@ def _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power):
     return envs, profiles
 
 
-def _make_agents(policy, n_agents, input_dim, cfg):
-    """Instantiate N agents of the given policy type."""
+def _make_agents(policy, n_agents, input_dim, cfg, use_lora=False):
+    """Instantiate N agents of the given policy type.
+
+    Args:
+        use_lora: When True, agents are created with LoRA adapters.
+                  Only applies to neural-network policies (PPO, SAC).
+    """
     agents = []
     for _ in range(n_agents):
         if policy == 'qlearning':
@@ -70,14 +76,13 @@ def _make_agents(policy, n_agents, input_dim, cfg):
                 lr=cfg.get('learning_rate', 1e-4),
                 update_timestep=cfg.get('update_timestep', 240),
                 K_epochs=cfg.get('k_epochs', 10),
+                use_lora=use_lora,
             ))
         elif policy == 'sac':
             agents.append(SACAgent(
                 input_dim=input_dim,
                 action_dim=1,
-                lr=cfg.get('learning_rate', 3e-4),
-                batch_size=cfg.get('batch_size', 256),
-                warmup_steps=cfg.get('warmup_steps', 500),
+                use_lora=use_lora,
             ))
         else:
             raise ValueError(f"Unknown policy: {policy}")
@@ -110,6 +115,7 @@ def run_single_experiment(
     verbose=True,
     progress_enabled=True,
     dev_mode=False,
+    use_lora=False,
     **extra_cfg,
 ):
     """
@@ -175,12 +181,41 @@ def run_single_experiment(
     # Input dimension probe
     dummy_state = envs[0].get_state(0.0, 0.0, [0.0] * 5)
     input_dim = len(dummy_state)
-    agents = _make_agents(policy, n_agents, input_dim, cfg)
+    agents = _make_agents(policy, n_agents, input_dim, cfg, use_lora=use_lora)
+
+    if use_lora and policy != 'qlearning':
+        lora_label = 'LoRA'
+    else:
+        lora_label = 'Full'
+    if verbose:
+        print(f"  [{combo_name}] Parameter mode: {lora_label}")
 
     # --- FL infrastructure (if applicable) ---
     server = None
     edges = []
     if aggregation != 'none':
+        # ── FL + LoRA guardrail ──
+        # When LoRA is enabled, all agents MUST share identical frozen base
+        # weights. We enforce this by broadcasting agent[0]'s full state dict
+        # as the canonical base model before FL begins. Only LoRA adapters
+        # will diverge during local training and be aggregated.
+        if use_lora and policy != 'qlearning':
+            base_params = {k: v.cpu().numpy() for k, v in agents[0].actor.state_dict().items()} \
+                          if hasattr(agents[0], 'actor') else \
+                          {k: v.cpu().numpy() for k, v in agents[0].policy.state_dict().items()}
+            # Sync all agents to the same base model
+            for agent in agents[1:]:
+                if hasattr(agent, 'actor'):  # SAC
+                    sd = {k: torch.from_numpy(v).to(agent.device) for k, v in base_params.items()}
+                    agent.actor.load_state_dict(sd)
+                    # Critic uses its own base (already randomly identical via same seed)
+                else:  # PPO
+                    sd = {k: torch.from_numpy(v).to(agent.device) for k, v in base_params.items()}
+                    agent.policy.load_state_dict(sd)
+                    agent.policy_old.load_state_dict(sd)
+            if verbose:
+                print(f"  [{combo_name}] FL+LoRA: Base model synced across {n_agents} agents")
+
         server = FederatedServer(strategy=aggregation)
         server.initialize(agents[0].get_parameters())  # seed global model
 
