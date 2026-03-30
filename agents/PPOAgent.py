@@ -5,6 +5,11 @@ import torch.optim as optim
 from torch.distributions import Normal
 from agents.BaseAgent import BaseAgent
 from utils.device_utils import get_device, device_info
+from utils.config_loader import get_config
+from utils.lora import (
+    apply_lora, get_lora_parameters, get_lora_state_dict,
+    load_lora_state_dict, get_lora_config, count_parameters,
+)
 
 # 
 
@@ -16,8 +21,6 @@ class ActorCritic(nn.Module):
     """
     def __init__(self, input_dim, action_dim, hidden_dim=64, std_init=0.5):
         super(ActorCritic, self).__init__()
-        
-        # Shared feature extractor (optional, usually separate is more stable)
         
         # --- CRITIC (Value Function) ---
         self.critic = nn.Sequential(
@@ -81,22 +84,66 @@ class PPOAgent(BaseAgent):
 
     GPU: Networks and tensors are automatically placed on the best available
     device (CUDA → MPS → CPU) via device_utils.get_device().
+
+    LoRA: When use_lora=True, base network weights are frozen and only
+    low-rank adapter matrices are trainable. This reduces the number of
+    trainable parameters and communication cost in federated learning.
+
+    Config: Hyperparameters loaded from configs/ppo.yaml. Constructor args
+    override YAML values (backward compatible with existing call sites).
     """
-    def __init__(self, input_dim, action_dim=1, lr=3e-4, gamma=0.99, eps_clip=0.2, K_epochs=4, update_timestep=2000):
+    def __init__(self, input_dim, action_dim=1, lr=None, gamma=None, eps_clip=None,
+                 K_epochs=None, update_timestep=None, use_lora=False):
         # --- Device ---
         self.device = get_device()
 
-        self.gamma = gamma
-        self.eps_clip = eps_clip
-        self.K_epochs = K_epochs
-        self.update_timestep = update_timestep
+        # --- Load config from ppo.yaml, constructor args override ---
+        cfg = get_config('ppo')
+        self.gamma = gamma if gamma is not None else cfg.get('gamma', 0.99)
+        self.eps_clip = eps_clip if eps_clip is not None else cfg.get('eps_clip', 0.2)
+        self.K_epochs = K_epochs if K_epochs is not None else cfg.get('K_epochs', 4)
+        self.update_timestep = update_timestep if update_timestep is not None else cfg.get('update_timestep', 2000)
+        lr = lr if lr is not None else float(cfg.get('lr', 3e-4))
+        hidden_dim = cfg.get('hidden_dim', 64)
+        std_init = cfg.get('std_init', 0.5)
+
+        # --- LoRA flag: constructor arg > env var > yaml ---
+        self.use_lora = use_lora
+        if not self.use_lora:
+            lora_cfg = get_lora_config()
+            self.use_lora = lora_cfg.get('enabled', False)
+        self._lora_cfg = get_lora_config() if self.use_lora else {}
         
         # Action dim is usually 1 (Power) for EV charging
-        self.policy = ActorCritic(input_dim, action_dim).to(self.device)
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
-        
-        self.policy_old = ActorCritic(input_dim, action_dim).to(self.device)
-        self.policy_old.load_state_dict(self.policy.state_dict())
+        self.policy = ActorCritic(input_dim, action_dim, hidden_dim, std_init).to(self.device)
+        self.policy_old = ActorCritic(input_dim, action_dim, hidden_dim, std_init).to(self.device)
+
+        # --- Apply LoRA if enabled ---
+        if self.use_lora:
+            lora_rank = self._lora_cfg.get('rank', 4)
+            lora_alpha = self._lora_cfg.get('alpha', 8)
+            lora_targets = self._lora_cfg.get('target_modules', [])
+
+            apply_lora(self.policy, rank=lora_rank, alpha=lora_alpha, target_modules=lora_targets)
+            apply_lora(self.policy_old, rank=lora_rank, alpha=lora_alpha, target_modules=lora_targets)
+
+            # Re-sync policy_old with policy (including LoRA structure)
+            self.policy_old.load_state_dict(self.policy.state_dict())
+
+            # Move to device
+            self.policy = self.policy.to(self.device)
+            self.policy_old = self.policy_old.to(self.device)
+
+            trainable = count_parameters(self.policy, trainable_only=True)
+            print(f"[PPO] LoRA ENABLED  (rank={lora_rank}, α={lora_alpha})")
+            print(f"      Policy trainable params: {trainable:,}")
+
+        # --- Optimizer: only LoRA params when active ---
+        if self.use_lora:
+            self.optimizer = optim.Adam(get_lora_parameters(self.policy), lr=lr)
+        else:
+            self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+            self.policy_old.load_state_dict(self.policy.state_dict())
         
         self.buffer_states = []
         self.buffer_actions = []
@@ -197,10 +244,26 @@ class PPOAgent(BaseAgent):
         self.buffer_is_terminals.clear()
 
     def get_parameters(self):
-        """Always returns CPU numpy arrays so FL aggregation works regardless of device."""
-        return {k: v.cpu().numpy() for k, v in self.policy.state_dict().items()}
+        """Return model weights for FL aggregation.
+
+        When LoRA is active, returns ONLY the LoRA adapter weights,
+        reducing communication cost in federated learning.
+        Always returns CPU numpy arrays so FL aggregation works regardless of device.
+        """
+        if self.use_lora:
+            return get_lora_state_dict(self.policy, prefix='')
+        else:
+            return {k: v.cpu().numpy() for k, v in self.policy.state_dict().items()}
 
     def set_parameters(self, parameters):
-        new_state_dict = {k: torch.from_numpy(v).to(self.device) for k, v in parameters.items()}
-        self.policy.load_state_dict(new_state_dict)
-        self.policy_old.load_state_dict(new_state_dict)
+        """Load aggregated parameters.
+
+        When LoRA is active, loads ONLY LoRA adapter weights.
+        """
+        if self.use_lora:
+            load_lora_state_dict(self.policy, parameters, prefix='', device=self.device)
+            self.policy_old.load_state_dict(self.policy.state_dict())
+        else:
+            new_state_dict = {k: torch.from_numpy(v).to(self.device) for k, v in parameters.items()}
+            self.policy.load_state_dict(new_state_dict)
+            self.policy_old.load_state_dict(new_state_dict)
