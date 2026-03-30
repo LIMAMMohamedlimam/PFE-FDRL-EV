@@ -1,0 +1,33 @@
+# lora.yaml
+# Low-Rank Adaptation (LoRA) Configuration
+#
+# LoRA freezes the pre-trained base weights W₀ and only trains small
+# low-rank matrices A, B such that: W_eff = W₀ + B·A · (alpha/rank)
+#
+# Override 'enabled' at runtime with environment variable: USE_LORA=true
+
+# Master switch
+enabled: false
+
+# Low-rank decomposition rank (r).  Smaller = fewer params, less expressive.
+# Typical values: 2–16.  With hidden_dim=128, rank=4 gives ~6% of original params.
+rank: 4
+
+# Scaling factor.  Effective scaling = alpha / rank.
+# Higher alpha amplifies the LoRA contribution.
+alpha: 8
+
+# Layer name patterns to apply LoRA to.
+# Any nn.Linear whose full name contains one of these substrings gets wrapped.
+target_modules:
+  # SAC GaussianPolicy layers
+  - "fc1"
+  - "fc2"
+  - "mu_head"
+  - "log_std_head"
+  # SAC TwinQNetwork layers (matched via nn.Sequential index)
+  - "q1"
+  - "q2"
+  # PPO ActorCritic layers
+  - "critic"
+  - "actor_mu"
