@@ -1,0 +1,16 @@
+# ppo.yaml
+# Proximal Policy Optimization hyperparameters
+# Previously hardcoded — now centralized here for consistency with sac.yaml
+
+# Core RL
+gamma: 0.99               # Discount factor
+eps_clip: 0.2             # PPO clipping parameter (ε)
+lr: 1.0e-4                # Learning rate for Adam optimizer
+
+# Update Schedule
+K_epochs: 10              # Number of optimization epochs per PPO update
+update_timestep: 240      # Collect this many transitions before each PPO update
+
+# Network Architecture
+hidden_dim: 64            # Hidden layer size for actor and critic MLPs
+std_init: 0.5             # Initial standard deviation for exploration (exp(log_std))

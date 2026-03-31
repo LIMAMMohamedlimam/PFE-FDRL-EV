@@ -1,0 +1,25 @@
+# training_dev.yaml
+# High-level training, simulation registry, and pipeline configurations
+
+# Simulation Run
+num_episodes: 20         # Number of training episodes per agent/combo
+num_test_episodes: 1     # Number of test episodes per agent/combo
+simulation_hours: 24      # Episode length in hours
+num_agents: 5            # Number of EVs in the simulation
+grid_type: "case33bw"     # pandapower grid topology
+
+# Agent Optimization Frequency
+update_every: 1           # Update agent weights every N steps
+
+# FL Strategies Defaults
+fl_rounds: 1          # Total aggregation rounds (typically 1 round = 10 episode)
+fl_fraction: 1.0          # Fraction of clients participating per round
+
+# Progress Bar Configuration
+progress:
+  enabled: true
+  level: "episode"        # Only "episode" is supported at the pipeline level for now
+
+# Real Price Data (optional)
+use_real_prices: true                    # true → load CSV prices, false → synthetic generator
+real_prices_csv: "data/iso_ne_prices_dev_test.csv" # Path to the ISO-NE style CSV (relative to project root)
