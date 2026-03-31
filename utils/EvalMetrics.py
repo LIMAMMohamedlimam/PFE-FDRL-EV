@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import json
 import csv
 import os
+import time
 
 class EvalMetrics:
     def __init__(self, run_name='metrics_plot', config=None):
@@ -13,6 +14,7 @@ class EvalMetrics:
         """
         self.run_name = run_name
         self.config = config if config is not None else {}
+        self.start_time = time.time()
         
         # 1. Convergence (Reward)
         self.episode_rewards = []
@@ -150,6 +152,11 @@ class EvalMetrics:
             json.dump(data, f, indent=4)
         
         print(f"-> Configuration saved to {json_path}")
+
+        # Also log the total execution time to the new execution_times.json
+        from utils.time_logger import log_execution_time
+        exec_time = time.time() - getattr(self, 'start_time', time.time())
+        log_execution_time(filename, run_summary, exec_time)
 
     def plot_metrics(self):
         """

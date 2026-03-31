@@ -400,6 +400,22 @@ def run_network_simulation(config: dict = None) -> SimulationResult:
     print(f"  TOTAL: {result.total_mb:.2f} MB | {result.total_time_s:.4f}s")
     print(f"  Upload: {result.upload_bytes / (1024*1024):.2f} MB | "
           f"Download: {result.download_bytes / (1024*1024):.2f} MB")
+          
+    execution_time_s = time.time() - start_time
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_id = f"network_sim_{mode_name.replace(' ', '_').lower()}_{timestamp}"
+    
+    run_info = {
+        "type": "network_simulation",
+        "mode": mode_name,
+        "n_agents": n_agents,
+        "n_edges": n_edges,
+        "simulated_total_bytes": total['total_bytes'],
+        "simulated_total_time_s": total['total_time_s'],
+        "config": config
+    }
+    log_execution_time(run_id, run_info, execution_time_s)
+          
     return result
 
 

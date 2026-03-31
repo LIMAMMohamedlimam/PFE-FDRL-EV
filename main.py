@@ -315,11 +315,14 @@ def run_Q_learning_simulation(dev_mode=False):
 
     metrics.plot_metrics()
 
-def run_PPO_policy_simulation():
+def run_PPO_policy_simulation(dev_mode=False):
     print("--- 1. Initialization of Continuous PPO EV Charging ---")
     
     # --- CONFIGURATION DICTIONARY ---
-    train_cfg = get_config('training')
+    if dev_mode:
+        train_cfg = get_config('training_dev')
+    else:
+        train_cfg = get_config('training')
     env_cfg = get_config('env')
     simulation_config = {
         "type": "PPO-Continuous",
