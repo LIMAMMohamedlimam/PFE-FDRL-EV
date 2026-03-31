@@ -344,7 +344,7 @@ def run_network_simulation(config: dict = None) -> SimulationResult:
 
             # 3) Broadcast back (download logged by InstrumentedAgent.set_parameters)
             for agent in agents:
-                agent.set_parameters(global_params)
+                agent.set_parameters(global_params, log_transfer=False)
 
         else:
             # Mode B: agents → edges → cloud
@@ -420,7 +420,10 @@ def run_comparison(config: dict = None,
     Returns:
         Dict with keys 'cloud_only' and 'hierarchical'.
     """
-    base_cfg = {**DEFAULT_CONFIG, **(config or {})}
+    # base_cfg = {**DEFAULT_CONFIG, **(config or {})}
+    base_cfg = DEFAULT_CONFIG
+
+    print("base_cfg",  base_cfg)
 
     # ── Mode A: Cloud-only ──
     cloud_cfg = {**base_cfg, 'n_edges': 0}

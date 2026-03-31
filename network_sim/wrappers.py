@@ -68,14 +68,14 @@ class InstrumentedAgent:
             )
         return params
 
-    def set_parameters(self, parameters):
+    def set_parameters(self, parameters, log_transfer: bool = True):
         """
         Log the download, then call the real agent's set_parameters().
         WHERE COMMUNICATION IS SIMULATED: here we measure the global
         model being sent back down to the agent.
         """
         # Log download: source → agent
-        if self._upload_target is not None:
+        if log_transfer and self._upload_target is not None:
             self._simulator.log_transfer(
                 src=self._upload_target,  # comes from edge/cloud
                 dst=self._agent_node,

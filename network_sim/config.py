@@ -6,17 +6,17 @@ config.py — Default configuration for network simulation
 # ── Hierarchical mode (agents → edges → cloud) ──
 DEFAULT_CONFIG = {
     # Simulation structure
-    'n_agents': 10,
+    'n_agents': 20,
     'n_edges': 3,
     'n_rounds': 5,              # Number of FL aggregation rounds
-    'episodes_per_round': 1,    # Training episodes between each FL round
+    'episodes_per_round': 20,    # Training episodes between each FL round
     'simulation_hours': 24,
 
     # RL settings (reuses existing agents, not modified)
-    'policy': 'sac',            # 'sac' | 'ppo' | 'qlearning'
+    'policy': 'ppo',            # 'sac' | 'ppo' | 'qlearning'
     'aggregation': 'fedavg',    # 'fedavg' | 'fedopt'
     'use_lora': False,
-    'dev_mode': True,           # Use training_dev.yaml for speed
+    'dev_mode': False,           # Use training_dev.yaml for speed
 
     # Network parameters — Agent (vehicle) uplink
     'agent_bandwidth_mbps': 10,     # Typical LTE uplink
