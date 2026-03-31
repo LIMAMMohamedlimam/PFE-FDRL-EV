@@ -158,7 +158,9 @@ class PPOAgent(BaseAgent):
         """
         Returns a continuous action value in range [-1, 1].
         """
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        state_tensor = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0)
+        if self.device.type != 'cpu':
+            state_tensor = state_tensor.to(self.device)
 
         if eval_mode:
             with torch.no_grad():
@@ -178,8 +180,8 @@ class PPOAgent(BaseAgent):
         """
         Standard PPO buffer storage. Tensors stored on device.
         """
-        self.buffer_states.append(torch.FloatTensor(state).to(self.device))
-        self.buffer_actions.append(torch.FloatTensor([action]).to(self.device))
+        self.buffer_states.append(torch.as_tensor(state, dtype=torch.float32))
+        self.buffer_actions.append(torch.as_tensor([action], dtype=torch.float32))
         self.buffer_logprobs.append(self.current_log_prob)
         self.buffer_rewards.append(reward)
         self.buffer_is_terminals.append(done)
@@ -229,7 +231,7 @@ class PPOAgent(BaseAgent):
 
             loss = -torch.min(surr1, surr2) + 0.5 * nn.MSELoss()(state_values, rewards) - 0.01 * dist_entropy
             
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             loss.mean().backward()
             # Gradient Clipping
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
