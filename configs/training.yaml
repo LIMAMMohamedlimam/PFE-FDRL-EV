@@ -12,7 +12,7 @@ grid_type: "case33bw"     # pandapower grid topology
 update_every: 10           # Update agent weights every N steps
 
 # FL Strategies Defaults
-fl_rounds: 6            # Total aggregation rounds (typically 1 round = 1 episode)
+fl_rounds: 6            # Total aggregation rounds 
 fl_fraction: 1.0          # Fraction of clients participating per round
 
 # Progress Bar Configuration

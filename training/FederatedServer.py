@@ -115,5 +115,28 @@ class FederatedServer:
             return None
         return {k: v.copy() for k, v in self.global_params.items()}
 
+    def collect_selected(self, agents, selected_indices):
+        """Collect local parameters from a subset of agents.
+
+        Drop-in replacement for the full-collection path when SWIFT is active.
+        The full broadcast still goes to all agents via broadcast().
+
+        Args:
+            agents: Full list of agents.
+            selected_indices: Indices of agents selected by SWIFTScheduler.
+
+        Returns:
+            list of dicts matching the ``aggregate()`` input format:
+            ``[{'params': dict, 'n_samples': int}, ...]``
+        """
+        selected_agents = [agents[i] for i in selected_indices]
+        edge_updates = []
+        for agent in selected_agents:
+            edge_updates.append({
+                'params': agent.get_parameters(),
+                'n_samples': 1,
+            })
+        return edge_updates
+
     def get_round(self):
         return self.round_number

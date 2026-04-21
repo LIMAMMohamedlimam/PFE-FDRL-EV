@@ -35,6 +35,9 @@ class EvalMetrics:
         # 6. Detailed per-step EV logs (for PaperPlotter)
         self.ev_logs = []
 
+        # 7. SWIFT selection logs (one entry per FL round when SWIFT is active)
+        self.swift_log = []
+
     def log_satisfaction(self, agent_satisfactions):
         avg_sat = np.mean(agent_satisfactions)
         self.satisfaction_history.append(avg_sat)
@@ -53,6 +56,24 @@ class EvalMetrics:
             self.episode_rewards.append(total_reward)
         else:
             self.test_rewards.append(total_reward)
+
+    def log_swift_selection(self, episode, selected_indices, stats):
+        """Log SWIFT selection for one FL round.
+
+        Args:
+            episode: Current episode/round number.
+            selected_indices: List of selected agent indices.
+            stats: Dict from ``SWIFTScheduler.get_round_stats()``.
+        """
+        entry = {
+            'episode': episode,
+            'selected_indices': selected_indices,
+            'n_selected': stats['n_selected'],
+            'n_eligible': stats['n_eligible'],
+            'avg_soc_gap': stats['avg_soc_gap'],
+        }
+        entry.update(stats.get('type_counts', {}))
+        self.swift_log.append(entry)
 
     def compute_stability_metric(self):
         if not self.grid_power_changes:
@@ -111,6 +132,17 @@ class EvalMetrics:
                     delta = self.grid_power_changes[i - 1] if i > 0 else ''
                     writer.writerow([i, load, delta])
             print(f"-> Grid data saved to {grid_csv_path}")
+
+        # ---- SWIFT selection CSV ---------------------------------------
+        if self.swift_log:
+            import pandas as pd
+            swift_csv_path = f'results/{self.run_name}_swift_selections.csv'
+            swift_df = pd.DataFrame(self.swift_log)
+            # Convert list column to string for clean CSV
+            if 'selected_indices' in swift_df.columns:
+                swift_df['selected_indices'] = swift_df['selected_indices'].apply(str)
+            swift_df.to_csv(swift_csv_path, index=False)
+            print(f"-> SWIFT selections saved to {swift_csv_path}")
 
         return ep_csv_path
 

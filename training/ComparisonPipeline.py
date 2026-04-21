@@ -116,6 +116,7 @@ def run_single_experiment(
     progress_enabled=True,
     dev_mode=False,
     use_lora=False,
+    use_swift=False,
     **extra_cfg,
 ):
     """
@@ -189,6 +190,17 @@ def run_single_experiment(
         lora_label = 'Full'
     if verbose:
         print(f"  [{combo_name}] Parameter mode: {lora_label}")
+
+    # --- SWIFT scheduler (if applicable) ---
+    scheduler = None
+    if use_swift:
+        from training.SWIFTScheduler import SWIFTScheduler
+        swift_cfg = get_config('swift')
+        scheduler = SWIFTScheduler(n_agents=n_agents, config=swift_cfg)
+        if verbose:
+            print(f"  [{combo_name}] SWIFT: fraction={swift_cfg['fraction']}, "
+                  f"min_stay={swift_cfg['min_stay_hours']}h, "
+                  f"force_after={swift_cfg['force_select_after']}")
 
     # --- FL infrastructure (if applicable) ---
     server = None
@@ -343,26 +355,44 @@ def run_single_experiment(
 
         # ── Federated aggregation round ──
         if aggregation != 'none' and (episode + 1) % fl_rounds_per_episode == 0:
-            # 1) Vehicles → Edges
-            for edge in edges:
-                for vid in edge.vehicle_ids:
-                    n_samples = sim_hours  # each vehicle contributed sim_hours transitions
-                    edge.collect(vid, agents[vid].get_parameters(), n_samples)
+            if scheduler is not None:
+                # SWIFT-filtered path
+                selected = scheduler.select_clients(
+                    agents, envs, profiles, current_round=episode
+                )
+                stats = scheduler.get_round_stats(selected, profiles)
+                metrics.log_swift_selection(episode, selected, stats)
 
-            # 2) Edges → Cloud
-            edge_updates = []
-            for edge in edges:
-                params, n = edge.aggregate()
-                if params is not None:
-                    edge_updates.append({'params': params, 'n_samples': n})
+                # Use edge aggregation path but filtered to selected agents
+                edge_updates = edges[0].collect_selected(agents, agent_bus_map, selected)
 
-            # 3) Cloud aggregation
-            if edge_updates:
-                global_params = server.aggregate(edge_updates)
+                if edge_updates:
+                    global_params = server.aggregate(edge_updates)
+                    # Broadcast to ALL agents (standard FL invariant)
+                    for agent in agents:
+                        agent.set_parameters(global_params)
+            else:
+                # Existing path — untouched
+                # 1) Vehicles → Edges
+                for edge in edges:
+                    for vid in edge.vehicle_ids:
+                        n_samples = sim_hours
+                        edge.collect(vid, agents[vid].get_parameters(), n_samples)
 
-                # 4) Broadcast back to all vehicles
-                for agent in agents:
-                    agent.set_parameters(global_params)
+                # 2) Edges → Cloud
+                edge_updates = []
+                for edge in edges:
+                    params, n = edge.aggregate()
+                    if params is not None:
+                        edge_updates.append({'params': params, 'n_samples': n})
+
+                # 3) Cloud aggregation
+                if edge_updates:
+                    global_params = server.aggregate(edge_updates)
+
+                    # 4) Broadcast back to all vehicles
+                    for agent in agents:
+                        agent.set_parameters(global_params)
 
         if verbose and (episode + 1) % 10 == 0:
             avg_r = np.mean(metrics.episode_rewards[-10:])

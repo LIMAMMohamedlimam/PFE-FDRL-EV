@@ -1,0 +1,23 @@
+# SWIFT Client Selection Configuration
+# Follows the same pattern as sac.yaml, lora.yaml
+
+enabled: false
+
+# Minimum remaining parking hours for an EV to be eligible this FL round
+# Maps to: env.t_dep - env.current_step >= min_stay_hours
+min_stay_hours: 2
+
+# Fraction of eligible clients selected per round (after force-selects)
+fraction: 0.6
+
+# Utility component weights (must not be required to sum to 1)
+utility_weights:
+  staleness: 0.4   # reward for unseen agents
+  soc_gap: 0.4     # reward for agents far from target
+  diversity: 0.2   # reward for minority driver types
+
+# Staleness normalization ceiling
+staleness_cap: 15
+
+# Force-select any agent unseen for this many consecutive rounds
+force_select_after: 20

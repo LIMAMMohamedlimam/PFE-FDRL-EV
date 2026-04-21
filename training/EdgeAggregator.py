@@ -95,6 +95,43 @@ class EdgeAggregator:
 
         return aggregated, total_samples
 
+    def collect_selected(self, agents, agent_bus_map, selected_indices):
+        """Filter edge-level collection to only selected agents.
+
+        Each edge group drops any agent not in ``selected_indices``.
+        Returns per-edge aggregated parameters suitable for
+        ``FederatedServer.aggregate()``.
+
+        Args:
+            agents: Full list of agents.
+            agent_bus_map: Dict mapping agent index → bus id.
+            selected_indices: Indices chosen by SWIFTScheduler.
+
+        Returns:
+            List of dicts ``[{'params': dict, 'n_samples': int}, ...]``,
+            one per edge group that has at least one selected agent.
+        """
+        selected_set = set(selected_indices)
+
+        # Rebuild bus groups with only selected agents
+        edge_groups = {}
+        for i, bus in agent_bus_map.items():
+            if i in selected_set:
+                edge_groups.setdefault(bus, []).append(i)
+
+        # Aggregate per edge group
+        edge_updates = []
+        for bus, indices in edge_groups.items():
+            # Temporary edge for aggregation
+            tmp_edge = EdgeAggregator(edge_id=bus, vehicle_ids=indices)
+            for vid in indices:
+                tmp_edge.collect(vid, agents[vid].get_parameters(), n_samples=1)
+            params, n = tmp_edge.aggregate()
+            if params is not None:
+                edge_updates.append({'params': params, 'n_samples': n})
+
+        return edge_updates
+
     def n_collected(self):
         """Number of vehicles that have reported in this round."""
         return len(self._collected)

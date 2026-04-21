@@ -1186,6 +1186,54 @@ def run_federated_simulation(dev_mode=False):
     m.plot_metrics()
 
 
+def run_federated_swift_simulation(dev_mode=False, use_lora=False):
+    """Federated training with SWIFT client selection."""
+    from training.SWIFTScheduler import SWIFTScheduler
+    from utils.config_loader import get_config as _get_config
+
+    lora_label = ' + LoRA' if use_lora else ''
+    print(f"[SWIFT mode: ENABLED{lora_label} for Federated Training]")
+
+    policy_choice = questionary.select(
+        "Select RL policy:",
+        choices=[
+            questionary.Choice("PPO", value='ppo'),
+            questionary.Choice("SAC", value='sac'),
+            questionary.Choice("Q-Learning", value='qlearning'),
+        ]
+    ).ask()
+    if policy_choice is None:
+        sys.exit(0)
+
+    agg_choice = questionary.select(
+        "Select aggregation strategy:",
+        choices=[
+            questionary.Choice("FedAvg", value='fedavg'),
+            questionary.Choice("FedOpt (server momentum)", value='fedopt'),
+        ]
+    ).ask()
+    if agg_choice is None:
+        sys.exit(0)
+
+    # Load and display SWIFT config for user awareness
+    swift_cfg = _get_config('swift')
+    print(f"\n>>> SWIFT config: fraction={swift_cfg['fraction']}, "
+          f"min_stay_hours={swift_cfg['min_stay_hours']}, "
+          f"force_select_after={swift_cfg['force_select_after']}")
+    print(f">>> LoRA: {'enabled' if use_lora else 'disabled'}")
+    print(f">>> Running Federated + SWIFT: {policy_choice} + {agg_choice}\n")
+
+    m = run_single_experiment(
+        policy=policy_choice,
+        aggregation=agg_choice,
+        verbose=True,
+        dev_mode=dev_mode,
+        use_lora=use_lora,
+        use_swift=True,
+    )
+    m.plot_metrics()
+
+
 # def main():
 #     parser = argparse.ArgumentParser(description="FDRL EV Charging Simulation")
 #     parser.add_argument(
@@ -1288,6 +1336,8 @@ def main():
                     questionary.Choice("SAC + LoRA Training", value=6),
                     questionary.Choice("PPO + LoRA Training", value=7),
                     questionary.Choice("Federated Training + LoRA", value=8),
+                    questionary.Choice("Federated + SWIFT scheduling", value=9),
+                    questionary.Choice("Federated + SWIFT + LoRA", value=10),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1303,6 +1353,8 @@ def main():
                     questionary.Choice("SAC + LoRA Training (dev)", value=6),
                     questionary.Choice("PPO + LoRA Training (dev)", value=7),
                     questionary.Choice("Federated Training + LoRA (dev)", value=8),
+                    questionary.Choice("Federated + SWIFT scheduling (dev)", value=9),
+                    questionary.Choice("Federated + SWIFT + LoRA (dev)", value=10),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1329,6 +1381,10 @@ def main():
             run_PPO_lora_simulation()
         elif args.simulation == 8:
             run_federated_lora_simulation()
+        elif args.simulation == 9:
+            run_federated_swift_simulation()
+        elif args.simulation == 10:
+            run_federated_swift_simulation(use_lora=True)
         else:
             print(f"Error: Simulation {args.simulation} is not valid for Training mode.")
             sys.exit(1)
@@ -1351,6 +1407,10 @@ def main():
             run_PPO_lora_simulation(dev_mode=True)
         elif args.simulation == 8:
             run_federated_lora_simulation(dev_mode=True)
+        elif args.simulation == 9:
+            run_federated_swift_simulation(dev_mode=True)
+        elif args.simulation == 10:
+            run_federated_swift_simulation(dev_mode=True, use_lora=True)
         else:
             print(f"Error: Simulation {args.simulation} is not valid for Development mode.")
             sys.exit(1)
