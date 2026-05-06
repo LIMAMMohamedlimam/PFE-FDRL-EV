@@ -2,14 +2,18 @@
 # High-level training, simulation registry, and pipeline configurations
 
 # Simulation Run
-num_episodes: 1000        # Number of training episodes per agent/combo
-num_test_episodes: 100     # Number of test episodes per agent/combo
+num_episodes: 600        # Number of training episodes per agent/combo
+num_test_episodes: 60     # Number of test episodes per agent/combo
 simulation_hours: 24      # Episode length in hours
 num_agents: 20            # Number of EVs in the simulation
 grid_type: "case33bw"     # pandapower grid topology
 
 # Agent Optimization Frequency
 update_every: 10           # Update agent weights every N steps
+
+# FL Parameters
+num_edges: 2            # Number of edge servers 
+fl_rounds_per_episode: 1 # Number of aggregation rounds per training episode
 
 # FL Strategies Defaults
 fl_rounds: 6            # Total aggregation rounds 

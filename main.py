@@ -1177,9 +1177,6 @@ def run_federated_simulation(dev_mode=False):
     m = run_single_experiment(
         policy=policy_choice,
         aggregation=agg_choice,
-        n_episodes=300,
-        n_test_episodes=10,
-        n_agents=10,
         verbose=True,
         dev_mode=dev_mode,
     )

@@ -141,9 +141,8 @@ def run_single_experiment(
     ev_capacity = env_cfg.get('battery_capacity', 60.0)
     ev_max_power = env_cfg.get('max_power', 11.0)
     
-    # We use 2 edge servers for FHDP currently
-    n_edges = 2
-    fl_rounds_per_episode = 1
+    n_edges = train_cfg.get('num_edges', 2)
+    fl_rounds_per_episode = train_cfg.get('fl_rounds_per_episode', 1)
 
     combo_name = f"{policy}_{aggregation}"
     run_name = f"{combo_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
