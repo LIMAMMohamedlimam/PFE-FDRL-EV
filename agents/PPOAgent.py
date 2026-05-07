@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import os
 import torch.optim as optim
 from torch.distributions import Normal
 from agents.BaseAgent import BaseAgent
@@ -269,3 +270,23 @@ class PPOAgent(BaseAgent):
             new_state_dict = {k: torch.from_numpy(v).to(self.device) for k, v in parameters.items()}
             self.policy.load_state_dict(new_state_dict)
             self.policy_old.load_state_dict(new_state_dict)
+
+    def save_trained_model(self, directory, agent_id):
+        if self.use_lora:
+            filename = os.path.join(directory, f"ppo_agent_lora_{agent_id}.pth")
+            torch.save(self.state_dict(), filename)
+            print(f"Saved LoRA adapters for agent {agent_id} to {filename}")
+        else:
+            filename = os.path.join(directory, f"ppo_agent_{agent_id}.pth")
+            torch.save(self.state_dict(), filename)
+            print(f"Saved full model for agent {agent_id} to {filename}")
+
+    def load_trained_model(self, directory, agent_id):
+        if self.use_lora:
+            filename = os.path.join(directory, f"ppo_agent_lora_{agent_id}.pth")
+            self.load_state_dict(torch.load(filename))
+            print(f"Loaded LoRA adapters for agent {agent_id} from {filename}")
+        else:
+            filename = os.path.join(directory, f"ppo_agent_{agent_id}.pth")
+            self.load_state_dict(torch.load(filename))
+            print(f"Loaded full model for agent {agent_id} from {filename}")

@@ -15,6 +15,7 @@ from datetime import datetime
 from tqdm import tqdm
 import os
 import multiprocessing as mp
+from utils.functions import ts
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Project modules
@@ -119,6 +120,7 @@ def run_single_experiment(
     use_swift=False,
     **extra_cfg,
 ):
+    print("Running single experiment... {policy} {aggregation}")
     """
     Train and evaluate a single policy+aggregation combination using YAML configs.
 
@@ -145,6 +147,10 @@ def run_single_experiment(
     fl_rounds_per_episode = train_cfg.get('fl_rounds_per_episode', 1)
 
     combo_name = f"{policy}_{aggregation}"
+    if use_lora :
+        combo_name += '_lora'
+    if use_swift:
+        combo_name += '_swift'
     run_name = f"{combo_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     # Base configuration passed down (SAC loads its own via sac.yaml now)
@@ -456,6 +462,16 @@ def run_single_experiment(
                 env.episode_log = []
 
         metrics.log_episode(total_test_reward, mode='test')
+
+    # Save trained models
+    if policy in ['ppo', 'sac']:
+        model_dir = os.path.join('trained_models', combo_name, ts())
+        os.makedirs(model_dir, exist_ok=True)
+        for i, agent in enumerate(agents):
+            agent.save_trained_model(model_dir, i)
+        print(f"All agents trained and saved to {model_dir}")
+    else:
+        print(f"Policy {policy} does not support model saving.")
 
     return metrics
 

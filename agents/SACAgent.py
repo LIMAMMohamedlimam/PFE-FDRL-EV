@@ -5,6 +5,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
 
+import os
+
 from agents.BaseAgent import BaseAgent
 from utils.device_utils import get_device, device_info
 from utils.config_loader import get_config
@@ -12,6 +14,7 @@ from utils.lora import (
     apply_lora, get_lora_parameters, get_lora_state_dict,
     load_lora_state_dict, get_lora_config, count_parameters,
 )
+from utils.functions import ts
 
 
 # ---------------------------------------------------------------------------
@@ -364,3 +367,27 @@ class SACAgent(BaseAgent):
                 target_param.data.copy_(
                     self.tau * param.data + (1.0 - self.tau) * target_param.data
                 )
+
+    # Agent saving function
+    def save_trained_model(self, directory, agent_id):
+        ts = ts()
+        filename = os.path.join(directory, f"sac_agent_{agent_id}.pth")
+        torch.save(self.state_dict(), filename)
+        print(f"Saved agent {agent_id} to {filename}")
+
+    # Agent loading function
+    def load_trained_model(self, directory, agent_id):
+        filename = os.path.join(directory, f"sac_agent_{agent_id}.pth")
+        self.load_state_dict(torch.load(filename))
+        print(f"Loaded agent {agent_id} from {filename}")
+    
+    def save_lora_adapters(self, directory, agent_id):
+        ts = ts()
+        filename = os.path.join(directory, f"sac_agent_lora_{agent_id}.pth")
+        torch.save(self.state_dict(), filename)
+        print(f"Saved LoRA adapters for agent {agent_id} to {filename}")
+    
+    def load_lora_adapters(self, directory, agent_id):
+        filename = os.path.join(directory, f"sac_agent_lora_{agent_id}.pth")
+        self.load_state_dict(torch.load(filename))
+        print(f"Loaded LoRA adapters for agent {agent_id} from {filename}")

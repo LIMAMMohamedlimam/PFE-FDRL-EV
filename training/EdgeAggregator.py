@@ -139,3 +139,5 @@ class EdgeAggregator:
     def n_vehicles(self):
         """Total number of vehicles assigned to this edge."""
         return len(self.vehicle_ids)
+
+    
