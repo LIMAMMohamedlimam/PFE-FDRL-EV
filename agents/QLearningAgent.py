@@ -1,5 +1,6 @@
 from agents.BaseAgent import BaseAgent
 import numpy as np
+import os
 
 class QLearningAgent(BaseAgent):
     """
@@ -79,3 +80,19 @@ class QLearningAgent(BaseAgent):
         """Replace Q-table with aggregated global parameters."""
         self.q_table = {k: v.copy() if isinstance(v, np.ndarray) else np.array(v)
                         for k, v in parameters.items()}
+
+    def save_trained_model(self, directory, agent_id):
+        """Save the Q-table for this agent."""
+        # make sure dir exists or create it
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            
+        filename = os.path.join(directory, f"ql_agent_{agent_id}.npy")
+        np.save(filename, self.q_table)
+        print(f"Saved Q-table for agent {agent_id} to {filename}")
+
+    def load_trained_model(self, directory, agent_id):
+        """Load the Q-table for this agent."""
+        filename = os.path.join(directory, f"ql_agent_{agent_id}.npy")
+        self.q_table = np.load(filename, allow_pickle=True).item()
+        print(f"Loaded Q-table for agent {agent_id} from {filename}")

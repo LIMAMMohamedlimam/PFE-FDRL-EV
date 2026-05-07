@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 import os
+from utils.functions import ts
 
 from agents.BaseAgent import BaseAgent
 from utils.device_utils import get_device, device_info
@@ -14,7 +15,6 @@ from utils.lora import (
     apply_lora, get_lora_parameters, get_lora_state_dict,
     load_lora_state_dict, get_lora_config, count_parameters,
 )
-from utils.functions import ts
 
 
 # ---------------------------------------------------------------------------
@@ -368,26 +368,80 @@ class SACAgent(BaseAgent):
                     self.tau * param.data + (1.0 - self.tau) * target_param.data
                 )
 
-    # Agent saving function
-    def save_trained_model(self, directory, agent_id):
-        ts = ts()
-        filename = os.path.join(directory, f"sac_agent_{agent_id}.pth")
-        torch.save(self.state_dict(), filename)
-        print(f"Saved agent {agent_id} to {filename}")
+    # ----- Model persistence -----
 
-    # Agent loading function
-    def load_trained_model(self, directory, agent_id):
-        filename = os.path.join(directory, f"sac_agent_{agent_id}.pth")
-        self.load_state_dict(torch.load(filename))
-        print(f"Loaded agent {agent_id} from {filename}")
-    
-    def save_lora_adapters(self, directory, agent_id):
-        ts = ts()
-        filename = os.path.join(directory, f"sac_agent_lora_{agent_id}.pth")
-        torch.save(self.state_dict(), filename)
-        print(f"Saved LoRA adapters for agent {agent_id} to {filename}")
-    
-    def load_lora_adapters(self, directory, agent_id):
-        filename = os.path.join(directory, f"sac_agent_lora_{agent_id}.pth")
-        self.load_state_dict(torch.load(filename))
-        print(f"Loaded LoRA adapters for agent {agent_id} from {filename}")
+    def save_trained_model(self, directory, agent_id):
+        """Save agent checkpoint (full weights or LoRA adapters).
+
+        Uses a single file per agent, matching the PPO/QLearning interface
+        so callers can do `agent.save_trained_model(dir, id)` uniformly.
+        """
+        os.makedirs(directory, exist_ok=True)
+
+        if self.use_lora:
+            filename = os.path.join(directory, f"sac_agent_lora_{agent_id}_{ts()}.pth")
+            # Save LoRA weights as raw tensors (NOT numpy) so that
+            # torch.load(..., weights_only=True) works in PyTorch 2.6+.
+            lora_state = {}
+            for name, param in self.actor.state_dict().items():
+                if 'lora_' in name:
+                    lora_state[f"actor.{name}"] = param.cpu()
+            for name, param in self.critic.state_dict().items():
+                if 'lora_' in name:
+                    lora_state[f"critic.{name}"] = param.cpu()
+            torch.save(lora_state, filename)
+            print(f"Saved LoRA adapters for agent {agent_id} to {filename}")
+        else:
+            filename = os.path.join(directory, f"sac_agent_{agent_id}.pth")
+            checkpoint = {
+                'actor': self.actor.state_dict(),
+                'critic': self.critic.state_dict(),
+                'critic_target': self.critic_target.state_dict(),
+                'log_alpha': self.log_alpha.detach().cpu(),
+                'alpha': self.alpha,
+            }
+            torch.save(checkpoint, filename)
+            print(f"Saved full model for agent {agent_id} to {filename}")
+
+    def load_trained_model(self, model_path):
+        """Load agent checkpoint (full weights or LoRA adapters).
+
+        Auto-detects the checkpoint format:
+          - Full checkpoint: dict with 'actor'/'critic' keys (state dicts)
+          - LoRA checkpoint: flat dict with 'actor.*lora*'/'critic.*lora*' keys
+        """
+        # weights_only=False needed for older LoRA checkpoints saved with numpy arrays
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+
+        # Auto-detect: full checkpoints have an 'actor' key holding a state dict
+        is_full_checkpoint = 'actor' in checkpoint and isinstance(checkpoint['actor'], dict)
+
+        if is_full_checkpoint:
+            self.actor.load_state_dict(checkpoint['actor'])
+            self.critic.load_state_dict(checkpoint['critic'])
+            # Prefer saved target; fall back to critic weights for older checkpoints
+            if 'critic_target' in checkpoint:
+                self.critic_target.load_state_dict(checkpoint['critic_target'])
+            else:
+                self.critic_target.load_state_dict(checkpoint['critic'])
+            # Restore entropy temperature
+            if 'log_alpha' in checkpoint:
+                self.log_alpha.data.copy_(checkpoint['log_alpha'].to(self.device))
+                self.alpha = checkpoint.get('alpha', self.log_alpha.exp().item())
+            print(f"Full weights loaded from {model_path}")
+        else:
+            # LoRA checkpoint: flat dict of prefixed lora weights
+            for network, prefix in [(self.actor, 'actor.'), (self.critic, 'critic.'),
+                                     (self.critic_target, 'critic.')]:
+                model_sd = network.state_dict()
+                prefix_len = len(prefix)
+                for key, value in checkpoint.items():
+                    if key.startswith(prefix) and 'lora_' in key:
+                        model_key = key[prefix_len:]
+                        if model_key in model_sd:
+                            # Handle both tensor and numpy values (backward compat)
+                            if isinstance(value, np.ndarray):
+                                value = torch.from_numpy(value)
+                            model_sd[model_key] = value.to(self.device)
+                network.load_state_dict(model_sd)
+            print(f"LoRA adapters loaded from {model_path}")

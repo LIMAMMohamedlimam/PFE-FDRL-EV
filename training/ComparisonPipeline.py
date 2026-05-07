@@ -403,6 +403,11 @@ def run_single_experiment(
             avg_r = np.mean(metrics.episode_rewards[-10:])
             print(f"  [{combo_name}] Ep {episode+1} | AvgR: {avg_r:.2f} | Cost: ${total_cost:.2f}")
 
+    # save models
+    model_dir = os.path.join("results/trained_models")
+    best_agent , agents_id = find_best_agent_by_reward(agents , policy)
+    save_agent_weights(best_agent,agents_id,model_dir)
+
     # ══════════════════════════════════════════════════════════════════
     # TESTING
     # ══════════════════════════════════════════════════════════════════
@@ -463,18 +468,26 @@ def run_single_experiment(
 
         metrics.log_episode(total_test_reward, mode='test')
 
-    # Save trained models
-    if policy in ['ppo', 'sac']:
-        model_dir = os.path.join('trained_models', combo_name, ts())
-        os.makedirs(model_dir, exist_ok=True)
-        for i, agent in enumerate(agents):
-            agent.save_trained_model(model_dir, i)
-        print(f"All agents trained and saved to {model_dir}")
-    else:
-        print(f"Policy {policy} does not support model saving.")
+    
+    
+    
 
     return metrics
 
+
+def find_best_agent_by_reward(agents,policy):
+    """Find the agent with the highest reward."""
+    if policy == "sac":
+        best_id , best_agent = max(enumerate(agents), key=lambda x: max(x[1].buffer.rewards))
+    elif policy == "ppo":
+        best_id , best_agent = max(enumerate(agents), key=lambda x: max(x[1].buffer_rewards))
+    return best_agent, best_id
+
+
+def save_agent_weights(agent,agent_id,model_dir):
+    """Save the agent weights."""
+    agent.save_trained_model(model_dir, agent_id)
+    print(f"Agent {agent_id} weights saved to {model_dir}")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Full comparison across all combinations
