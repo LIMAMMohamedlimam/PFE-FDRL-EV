@@ -2,8 +2,8 @@
 # High-level training, simulation registry, and pipeline configurations
 
 # Simulation Run
-num_episodes: 600        # Number of training episodes per agent/combo
-num_test_episodes: 60     # Number of test episodes per agent/combo
+num_episodes: 1000       # Number of training episodes per agent/combo
+num_test_episodes: 200     # Number of test episodes per agent/combo
 simulation_hours: 24      # Episode length in hours
 num_agents: 20            # Number of EVs in the simulation
 grid_type: "case33bw"     # pandapower grid topology
@@ -27,3 +27,66 @@ progress:
 # Real Price Data (optional)
 use_real_prices: true                    # true → load CSV prices, false → synthetic generator
 real_prices_csv: "data/iso_ne_prices_real.csv" # Path to the ISO-NE style CSV (relative to project root)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Baseline methods registry
+# Run all entries with: ComparisonPipeline.run_methods_from_config()
+# ─────────────────────────────────────────────────────────────────────────────
+methods:
+
+  # ── Existing: main HFDRL method ──────────────────────────────────────────
+  - name: "SAC HFedAvg SWIFT LoRA"
+    agent: sac
+    use_lora: true
+    use_swift: true
+    federated:
+      enabled: true
+      aggregation: fedavg
+
+  # ── Category 2: Federated aggregation variants ───────────────────────────
+  - name: "SAC FedProx"
+    agent: sac
+    federated:
+      enabled: true
+      aggregation: fedprox
+      mu_fedprox: 0.01
+
+  - name: "SAC FedAvgM"
+    agent: sac
+    federated:
+      enabled: true
+      aggregation: fedavgm
+      beta_momentum: 0.9
+
+  - name: "SAC FedAdam"
+    agent: sac
+    federated:
+      enabled: true
+      aggregation: fedadam
+      adam_lr: 0.01
+
+  # ── Category 3: Non-federated baselines ──────────────────────────────────
+  - name: "SAC Local-Only"
+    agent: sac
+    federated:
+      enabled: false
+
+  - name: "SAC Centralized Oracle"
+    agent: sac
+    centralized: true
+
+  # ── Category 1: Heuristic baselines ─────────────────────────────────────
+  - name: "Random"
+    agent: random
+
+  - name: "Greedy"
+    agent: greedy
+
+  - name: "EDF"
+    agent: edf
+
+  - name: "Price-Aware"
+    agent: price_aware
+
+  - name: "Simple MPC"
+    agent: simple_mpc

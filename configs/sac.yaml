@@ -16,3 +16,10 @@ update_every: 1           # Update network every N steps
 hidden_dim: 128           # Representational capacity of NN layers
 alpha_init: 0.2           # Initial temperature
 target_entropy_scale: -0.5 # target_entropy = action_dim * this_scale (less exploration)
+
+# Federated learning strategy (overridden per-method by training.yaml)
+federated:
+  aggregation: "fedavg"   # fedavg | fedprox | fedavgm | fedadam
+  mu_fedprox: 0.01        # FedProx proximal coefficient
+  beta_momentum: 0.9      # FedAvgM server-side momentum coefficient
+  adam_lr: 0.01           # FedAdam server learning rate

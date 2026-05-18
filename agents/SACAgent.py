@@ -238,6 +238,10 @@ class SACAgent(BaseAgent):
         # --- Step counter ---
         self.total_steps = 0
 
+        # --- FedProx proximal regularization ---
+        self._fedprox_global_params = None
+        self.mu_fedprox = 0.0
+
     # ----- BaseAgent interface -----
 
     def get_action(self, state, eval_mode=False):
@@ -316,6 +320,19 @@ class SACAgent(BaseAgent):
                 self.critic.load_state_dict(critic_sd)
                 self.critic_target.load_state_dict(critic_sd)
 
+    def set_fedprox_global(self, global_params: dict, mu: float = 0.01):
+        """Store the global model snapshot used by FedProx proximal regularisation.
+
+        Call this once after each FL aggregation round, before local training
+        resumes. The stored snapshot is used in _learn() to pull local weights
+        toward the global model.
+        """
+        self._fedprox_global_params = {
+            k: (v.copy() if hasattr(v, 'copy') else v)
+            for k, v in global_params.items()
+        }
+        self.mu_fedprox = mu
+
     # ----- Internal SAC learning -----
 
     def _learn(self):
@@ -336,6 +353,20 @@ class SACAgent(BaseAgent):
         q1_pred, q2_pred = self.critic(states, actions)
         critic_loss = F.mse_loss(q1_pred, td_target) + F.mse_loss(q2_pred, td_target)
 
+        # FedProx: proximal term μ/2 ||w_critic - w_global_critic||²
+        if self._fedprox_global_params is not None and self.mu_fedprox > 0.0:
+            prox = torch.tensor(0.0, device=self.device)
+            for name, param in self.critic.named_parameters():
+                if not param.requires_grad:
+                    continue
+                key = f"critic.{name}"
+                if key in self._fedprox_global_params:
+                    w_g = torch.as_tensor(
+                        self._fedprox_global_params[key], dtype=torch.float32
+                    ).to(self.device)
+                    prox = prox + ((param - w_g) ** 2).sum()
+            critic_loss = critic_loss + (self.mu_fedprox / 2.0) * prox
+
         self.critic_optim.zero_grad(set_to_none=True)
         critic_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
@@ -346,6 +377,20 @@ class SACAgent(BaseAgent):
         q1_new, q2_new = self.critic(states, new_actions)
         q_new = torch.min(q1_new, q2_new)
         actor_loss = (self.alpha * log_probs - q_new).mean()
+
+        # FedProx: proximal term μ/2 ||w_actor - w_global_actor||²
+        if self._fedprox_global_params is not None and self.mu_fedprox > 0.0:
+            prox = torch.tensor(0.0, device=self.device)
+            for name, param in self.actor.named_parameters():
+                if not param.requires_grad:
+                    continue
+                key = f"actor.{name}"
+                if key in self._fedprox_global_params:
+                    w_g = torch.as_tensor(
+                        self._fedprox_global_params[key], dtype=torch.float32
+                    ).to(self.device)
+                    prox = prox + ((param - w_g) ** 2).sum()
+            actor_loss = actor_loss + (self.mu_fedprox / 2.0) * prox
 
         self.actor_optim.zero_grad(set_to_none=True)
         actor_loss.backward()

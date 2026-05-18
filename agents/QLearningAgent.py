@@ -22,16 +22,24 @@ class QLearningAgent(BaseAgent):
 
     def _discretize_state(self, state):
         """
-        Maps continuous state s_{i,t}  to a tuple key for Q-table.
+        Maps continuous state s_{i,t} to a tuple key for Q-table.
+
+        Correct indices per EVClientEnv.get_state():
+          [0]=SOC, [1]=t_sin, [2]=t_cos, [3]=t_remaining_norm,
+          [4]=grid_signal, [5]=voltage_dev, [6]=ev_total, [7]=ev_delta,
+          [8..12]=price_forecast
         """
-        # Example discretization logic (simplified)
-        soc, t_rem, grid, volt = state[0], state[1], state[2], state[3]
-        
-        soc_bin = int(soc * 10) # 0-10
-        t_bin = int(t_rem)
-        grid_bin = int(grid > 0.5) # High/Low congestion
-        
-        return (soc_bin, t_bin, grid_bin)
+        soc      = state[0]   # SOC (0–1)
+        t_rem    = state[3]   # t_remaining_norm (0–1 range)
+        grid     = state[4]   # grid congestion signal (0–1)
+        price    = state[8]   # first price forecast element (normalised)
+
+        soc_bin   = min(int(soc * 10), 10)
+        t_bin     = min(int(t_rem * 10), 10)
+        grid_bin  = int(grid > 0.5)
+        price_bin = int(price > 1.0)
+
+        return (soc_bin, t_bin, grid_bin, price_bin)
 
     def get_action(self, state, eval_mode=False):
         """

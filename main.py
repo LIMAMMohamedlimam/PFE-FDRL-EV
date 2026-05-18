@@ -19,7 +19,11 @@ from agents.PPOAgent import PPOAgent
 from agents.SACAgent import SACAgent
 from training.FederatedServer import FederatedServer
 from training.EdgeAggregator import EdgeAggregator
-from training.ComparisonPipeline import run_single_experiment, run_comparison
+from training.ComparisonPipeline import (
+    run_single_experiment,
+    run_comparison,
+    run_methods_from_config,
+)
 
 
 def run_Q_learning_simulation(dev_mode=False):
@@ -1280,6 +1284,102 @@ import argparse
 import sys
 import questionary
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New baseline runners (Category 1 / 2 / 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_baseline_suite(dev_mode=False):
+    """Run ALL baselines listed in training.yaml → methods section."""
+    print("\n>>> Baseline Suite: reading methods from configs/training.yaml ...")
+    results = run_methods_from_config(dev_mode=dev_mode, verbose=True)
+    print(f"\n>>> Completed {len(results)} baselines.")
+
+
+def run_heuristic_simulation(dev_mode=False):
+    """Interactive heuristic baseline selection and evaluation."""
+    choice = questionary.select(
+        "Select heuristic baseline:",
+        choices=[
+            questionary.Choice("Random (uniform random action)", value='random'),
+            questionary.Choice("Greedy (charge when SOC < req)", value='greedy'),
+            questionary.Choice("EDF — Earliest Deadline First", value='edf'),
+            questionary.Choice("Price-Aware (threshold-based)", value='price_aware'),
+            questionary.Choice("Simple MPC (1-step lookahead)", value='simple_mpc'),
+        ]
+    ).ask()
+    if choice is None:
+        sys.exit(0)
+
+    print(f"\n>>> Running heuristic baseline: {choice}")
+    m = run_single_experiment(
+        policy=choice,
+        aggregation='none',
+        verbose=True,
+        dev_mode=dev_mode,
+    )
+    m.plot_metrics()
+
+
+def run_federated_variant_simulation(dev_mode=False):
+    """Interactive federated aggregation variant selection (FedProx / FedAvgM / FedAdam)."""
+    agg_choice = questionary.select(
+        "Select federated aggregation variant:",
+        choices=[
+            questionary.Choice("FedProx (proximal regularisation, μ=0.01)", value='fedprox'),
+            questionary.Choice("FedAvgM (server-side momentum, β=0.9)", value='fedavgm'),
+            questionary.Choice("FedAdam (server-side Adam, lr=0.01)", value='fedadam'),
+        ]
+    ).ask()
+    if agg_choice is None:
+        sys.exit(0)
+
+    lora_choice = questionary.confirm("Enable LoRA compression?", default=False).ask()
+    swift_choice = questionary.confirm("Enable SWIFT client selection?", default=False).ask()
+
+    print(f"\n>>> Running SAC + {agg_choice}"
+          f"{'  +LoRA' if lora_choice else ''}"
+          f"{'  +SWIFT' if swift_choice else ''}")
+
+    m = run_single_experiment(
+        policy='sac',
+        aggregation=agg_choice,
+        verbose=True,
+        dev_mode=dev_mode,
+        use_lora=lora_choice,
+        use_swift=swift_choice,
+        mu_fedprox=0.01,
+        beta_momentum=0.9,
+        adam_lr=0.01,
+    )
+    m.plot_metrics()
+
+
+def run_sac_local_simulation(dev_mode=False):
+    """SAC without any federated aggregation — each agent trains independently."""
+    print("\n>>> Running SAC Local-Only (no federation) ...")
+    m = run_single_experiment(
+        policy='sac',
+        aggregation='none',
+        verbose=True,
+        dev_mode=dev_mode,
+    )
+    m.plot_metrics()
+
+
+def run_sac_centralized_simulation(dev_mode=False):
+    """SAC Centralized Oracle — all agents share one network and replay buffer."""
+    print("\n>>> Running SAC Centralized Oracle (shared network) ...")
+    m = run_single_experiment(
+        policy='sac',
+        aggregation='none',
+        centralized=True,
+        verbose=True,
+        dev_mode=dev_mode,
+    )
+    m.plot_metrics()
+
+
 def main():
     parser = argparse.ArgumentParser(description="FDRL EV Charging Simulation")
     parser.add_argument(
@@ -1337,6 +1437,12 @@ def main():
                     questionary.Choice("Federated Training + LoRA", value=8),
                     questionary.Choice("Federated + SWIFT scheduling", value=9),
                     questionary.Choice("Federated + SWIFT + LoRA", value=10),
+                    questionary.Choice("── Baselines ──────────────────────────", value=-1),
+                    questionary.Choice("Baseline Suite (all methods from config)", value=11),
+                    questionary.Choice("Heuristic Baseline (Random/Greedy/EDF/Price/MPC)", value=12),
+                    questionary.Choice("Federated Variant (FedProx / FedAvgM / FedAdam)", value=13),
+                    questionary.Choice("SAC Local-Only (no federation)", value=14),
+                    questionary.Choice("SAC Centralized Oracle", value=15),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1354,6 +1460,12 @@ def main():
                     questionary.Choice("Federated Training + LoRA (dev)", value=8),
                     questionary.Choice("Federated + SWIFT scheduling (dev)", value=9),
                     questionary.Choice("Federated + SWIFT + LoRA (dev)", value=10),
+                    questionary.Choice("── Baselines ──────────────────────────", value=-1),
+                    questionary.Choice("Baseline Suite — all methods from config (dev)", value=11),
+                    questionary.Choice("Heuristic Baseline (dev)", value=12),
+                    questionary.Choice("Federated Variant — FedProx/FedAvgM/FedAdam (dev)", value=13),
+                    questionary.Choice("SAC Local-Only (dev)", value=14),
+                    questionary.Choice("SAC Centralized Oracle (dev)", value=15),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1384,6 +1496,19 @@ def main():
             run_federated_swift_simulation()
         elif args.simulation == 10:
             run_federated_swift_simulation(use_lora=True)
+        elif args.simulation == 11:
+            run_baseline_suite()
+        elif args.simulation == 12:
+            run_heuristic_simulation()
+        elif args.simulation == 13:
+            run_federated_variant_simulation()
+        elif args.simulation == 14:
+            run_sac_local_simulation()
+        elif args.simulation == 15:
+            run_sac_centralized_simulation()
+        elif args.simulation == -1:
+            print("Please select a valid simulation (not the separator).")
+            sys.exit(1)
         else:
             print(f"Error: Simulation {args.simulation} is not valid for Training mode.")
             sys.exit(1)
@@ -1410,6 +1535,19 @@ def main():
             run_federated_swift_simulation(dev_mode=True)
         elif args.simulation == 10:
             run_federated_swift_simulation(dev_mode=True, use_lora=True)
+        elif args.simulation == 11:
+            run_baseline_suite(dev_mode=True)
+        elif args.simulation == 12:
+            run_heuristic_simulation(dev_mode=True)
+        elif args.simulation == 13:
+            run_federated_variant_simulation(dev_mode=True)
+        elif args.simulation == 14:
+            run_sac_local_simulation(dev_mode=True)
+        elif args.simulation == 15:
+            run_sac_centralized_simulation(dev_mode=True)
+        elif args.simulation == -1:
+            print("Please select a valid simulation (not the separator).")
+            sys.exit(1)
         else:
             print(f"Error: Simulation {args.simulation} is not valid for Development mode.")
             sys.exit(1)
