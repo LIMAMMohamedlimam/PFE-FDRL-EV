@@ -38,6 +38,24 @@ class EvalMetrics:
         # 7. SWIFT selection logs (one entry per FL round when SWIFT is active)
         self.swift_log = []
 
+        # 8. Voltage violation tracking (per grid step, test phase)
+        self.voltage_violations = []     # 1 if any bus violated v_max, else 0
+
+        # 9. Federated communication overhead (ms per aggregation round)
+        self.comm_overhead_ms = []
+
+        # 10. Final SoC per test episode (mean across all EVs)
+        self.final_soc_per_test = []
+
+    def log_voltage_violation(self, violated: bool):
+        self.voltage_violations.append(1 if violated else 0)
+
+    def log_comm_overhead(self, ms: float):
+        self.comm_overhead_ms.append(float(ms))
+
+    def log_final_soc(self, mean_soc: float):
+        self.final_soc_per_test.append(float(mean_soc))
+
     def log_satisfaction(self, agent_satisfactions):
         avg_sat = np.mean(agent_satisfactions)
         self.satisfaction_history.append(avg_sat)

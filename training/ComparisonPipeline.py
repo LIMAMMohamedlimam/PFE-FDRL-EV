@@ -6,6 +6,7 @@ Unified runner that trains every combination of
 and produces comparative plots.
 """
 
+import time
 import numpy as np
 import torch
 import matplotlib
@@ -417,7 +418,9 @@ def run_single_experiment(
                 edge_updates = edges[0].collect_selected(agents, agent_bus_map, selected)
 
                 if edge_updates:
+                    _t0 = time.time()
                     global_params = server.aggregate(edge_updates)
+                    metrics.log_comm_overhead((time.time() - _t0) * 1000.0)
                     # Broadcast to ALL agents (standard FL invariant)
                     for agent in agents:
                         agent.set_parameters(global_params)
@@ -442,7 +445,9 @@ def run_single_experiment(
 
                 # 3) Cloud aggregation
                 if edge_updates:
+                    _t0 = time.time()
                     global_params = server.aggregate(edge_updates)
+                    metrics.log_comm_overhead((time.time() - _t0) * 1000.0)
 
                     # 4) Broadcast back to all vehicles
                     for agent in agents:
@@ -503,6 +508,7 @@ def run_single_experiment(
 
             lambda_grid, grid_info = grid.step(grid_inj, base_load)
             ev_total_mw = float(sum(grid_inj.values()))
+            metrics.log_voltage_violation(grid_info.get('voltage_violations', 0) > 0)
 
             for i, agent in enumerate(agents):
                 if not active[i]:
@@ -524,6 +530,7 @@ def run_single_experiment(
                 env.episode_log = []
 
         metrics.log_episode(total_test_reward, mode='test')
+        metrics.log_final_soc(float(np.mean([envs[i].soc for i in range(n_agents)])))
 
     
     

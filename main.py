@@ -24,6 +24,7 @@ from training.ComparisonPipeline import (
     run_comparison,
     run_methods_from_config,
 )
+from training.MultiSeedRunner import run_multiseed_pipeline
 
 
 def run_Q_learning_simulation(dev_mode=False):
@@ -1380,6 +1381,46 @@ def run_sac_centralized_simulation(dev_mode=False):
     m.plot_metrics()
 
 
+def run_multiseed_evaluation(dev_mode=False):
+    """Multi-seed statistical evaluation pipeline for AAAI publication."""
+    print("\n>>> Multi-Seed Statistical Evaluation")
+
+    n_seeds_choice = questionary.select(
+        "Number of seeds:",
+        choices=[
+            questionary.Choice("5  seeds  (minimum for significance)", value=5),
+            questionary.Choice("10 seeds  (preferred for AAAI)", value=10),
+        ]
+    ).ask()
+    if n_seeds_choice is None:
+        sys.exit(0)
+
+    seed_sets = {
+        5:  [0, 1, 2, 3, 4],
+        10: [0, 1, 2, 3, 4, 42, 123, 456, 789, 999],
+    }
+    seeds = seed_sets[n_seeds_choice]
+
+    method_filter = None
+    filter_choice = questionary.confirm(
+        "Run only the HFDRL method + key baselines? (faster; full suite otherwise)",
+        default=False,
+    ).ask()
+    if filter_choice:
+        method_filter = [
+            'SAC HFedAvg SWIFT LoRA',
+            'SAC Local-Only',
+            'SAC Centralized Oracle',
+            'Random',
+            'Greedy',
+            'Price-Aware',
+        ]
+
+    print(f"\n>>> Seeds: {seeds}")
+    print(f">>> Methods: {'filtered' if method_filter else 'all'}")
+    run_multiseed_pipeline(seeds=seeds, dev_mode=dev_mode, method_filter=method_filter)
+
+
 def main():
     parser = argparse.ArgumentParser(description="FDRL EV Charging Simulation")
     parser.add_argument(
@@ -1443,6 +1484,8 @@ def main():
                     questionary.Choice("Federated Variant (FedProx / FedAvgM / FedAdam)", value=13),
                     questionary.Choice("SAC Local-Only (no federation)", value=14),
                     questionary.Choice("SAC Centralized Oracle", value=15),
+                    questionary.Choice("── Statistics ─────────────────────────", value=-2),
+                    questionary.Choice("Multi-Seed Statistical Evaluation (AAAI)", value=16),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1466,6 +1509,8 @@ def main():
                     questionary.Choice("Federated Variant — FedProx/FedAvgM/FedAdam (dev)", value=13),
                     questionary.Choice("SAC Local-Only (dev)", value=14),
                     questionary.Choice("SAC Centralized Oracle (dev)", value=15),
+                    questionary.Choice("── Statistics ─────────────────────────", value=-2),
+                    questionary.Choice("Multi-Seed Statistical Evaluation (AAAI) (dev)", value=16),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1506,13 +1551,15 @@ def main():
             run_sac_local_simulation()
         elif args.simulation == 15:
             run_sac_centralized_simulation()
-        elif args.simulation == -1:
+        elif args.simulation == 16:
+            run_multiseed_evaluation()
+        elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
         else:
             print(f"Error: Simulation {args.simulation} is not valid for Training mode.")
             sys.exit(1)
-            
+
     elif args.mode == 2:  # Development Mode
         DataGenerator.dev_mode = True
         if args.simulation == 1:
@@ -1545,7 +1592,9 @@ def main():
             run_sac_local_simulation(dev_mode=True)
         elif args.simulation == 15:
             run_sac_centralized_simulation(dev_mode=True)
-        elif args.simulation == -1:
+        elif args.simulation == 16:
+            run_multiseed_evaluation(dev_mode=True)
+        elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
         else:
