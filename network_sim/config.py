@@ -7,8 +7,8 @@ config.py — Default configuration for network simulation
 DEFAULT_CONFIG = {
     # Simulation structure
     'n_agents': 20,
-    'n_edges': 3,
-    'n_rounds': 5,              # Number of FL aggregation rounds
+    'n_edges': 2,
+    'n_rounds': 6,              # Number of FL aggregation rounds
     'episodes_per_round': 20,    # Training episodes between each FL round
     'simulation_hours': 24,
 

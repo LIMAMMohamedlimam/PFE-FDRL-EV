@@ -12,12 +12,14 @@ Example usage:
     from network_sim import run_comparison, DEFAULT_CONFIG
     results = run_comparison(DEFAULT_CONFIG)
 """
-
+import argparse
 import sys
 import os
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+import time
+from datetime import datetime
 
 # Ensure project root is importable
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,6 +41,10 @@ from agents.PPOAgent import PPOAgent
 from training.FederatedServer import FederatedServer
 from training.EdgeAggregator import EdgeAggregator
 from utils.config_loader import get_config
+from utils.time_logger import log_execution_time
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -47,21 +53,34 @@ from utils.config_loader import get_config
 
 @dataclass
 class SimulationResult:
-    """Structured output from a network simulation run."""
+    """
+    Structured output from a network simulation run.
+
+    Unit conventions
+    ----------------
+    - *_bytes   : raw bytes (B)
+    - *_mb      : mebibytes (MiB = bytes / 1024²)
+    - *_time_s  : **simulated** network transfer time in seconds,
+                  computed per-transfer as:
+                    t = (size_MB × 8 / bandwidth_Mbps) + (latency_ms / 1000)
+                  then summed over all transfers (serial assumption).
+                  This is NOT wall-clock execution time.
+    - avg_*     : the corresponding total divided by n_rounds
+    """
     mode: str                       # 'cloud_only' or 'hierarchical'
-    total_bytes: int = 0
-    total_mb: float = 0.0
-    total_time_s: float = 0.0
-    avg_time_per_round: float = 0.0
-    avg_bytes_per_round: float = 0.0
+    total_bytes: int = 0            # Total data transferred (B), all rounds
+    total_mb: float = 0.0           # Same in MiB
+    total_time_s: float = 0.0      # Simulated comm time (s), all rounds, serial
+    avg_time_per_round: float = 0.0 # Simulated comm time per round (s)
+    avg_bytes_per_round: float = 0.0 # Data per round (B)
     n_rounds: int = 0
     n_agents: int = 0
     n_edges: int = 0
-    upload_bytes: int = 0
-    download_bytes: int = 0
+    upload_bytes: int = 0           # Total upload data (B), all rounds
+    download_bytes: int = 0         # Total download data (B), all rounds
     per_node_type: Dict = field(default_factory=dict)
     round_summaries: List[Dict] = field(default_factory=list)
-    model_size_bytes: int = 0       # Size of one model
+    model_size_bytes: int = 0       # Size of one model (B)
 
     def to_dict(self) -> dict:
         return {
@@ -200,15 +219,6 @@ def run_network_simulation(config: dict = None) -> SimulationResult:
     """
     Run an FL network simulation measuring communication overhead.
 
-    HOW TO PLUG INTO EXISTING TRAINING LOOP:
-    -----------------------------------------
-    1. Real agents are created normally (SACAgent / PPOAgent).
-    2. Each agent is wrapped in InstrumentedAgent(real_agent, node, sim).
-    3. Real EdgeAggregators are wrapped in InstrumentedEdge.
-    4. Real FederatedServer is wrapped in InstrumentedServer.
-    5. The training loop runs normally — wrappers intercept parameter
-       transfers to log communication costs.
-    6. After all rounds, metrics are extracted from the NetworkSimulator.
 
     Args:
         config: Dict with simulation parameters. See config.py for defaults.
@@ -216,12 +226,13 @@ def run_network_simulation(config: dict = None) -> SimulationResult:
     Returns:
         SimulationResult with all communication metrics.
     """
-    cfg = {**DEFAULT_CONFIG, **(config or {})}
+    start_time = time.time()
+    cfg = config if config is not None else {**DEFAULT_CONFIG}
 
     n_agents = cfg['n_agents']
     n_edges = cfg['n_edges']
     n_rounds = cfg['n_rounds']
-    episodes_per_round = cfg.get('episodes_per_round', 1)
+    episodes_per_round = 1 #cfg.get('episodes_per_round', 1)
     policy = cfg['policy']
     aggregation = cfg['aggregation']
     use_lora = cfg.get('use_lora', False)
@@ -344,7 +355,7 @@ def run_network_simulation(config: dict = None) -> SimulationResult:
 
             # 3) Broadcast back (download logged by InstrumentedAgent.set_parameters)
             for agent in agents:
-                agent.set_parameters(global_params, log_transfer=False)
+                agent.set_parameters(global_params, log_transfer=True)
 
         else:
             # Mode B: agents → edges → cloud
@@ -372,8 +383,9 @@ def run_network_simulation(config: dict = None) -> SimulationResult:
 
         round_summary = simulator.get_round_summary(round_num)
         print(f"  Round {round_num+1}/{n_rounds}: "
-              f"{round_summary['total_mb']:.2f} MB, "
-              f"{round_summary['total_time_s']:.4f}s")
+              f"{round_summary['total_mb']:.2f} MiB transferred, "
+              f"{round_summary['total_time_s']:.4f}s simulated comm time "
+              f"({round_summary['n_transfers']} transfers)")
         simulator.end_round()
 
     # ── Build result ──
@@ -397,21 +409,35 @@ def run_network_simulation(config: dict = None) -> SimulationResult:
     )
 
     print(f"\n  {'─'*50}")
-    print(f"  TOTAL: {result.total_mb:.2f} MB | {result.total_time_s:.4f}s")
-    print(f"  Upload: {result.upload_bytes / (1024*1024):.2f} MB | "
-          f"Download: {result.download_bytes / (1024*1024):.2f} MB")
-          
+    print(f"  SIMULATED COMM TOTALS (serial, all {n_rounds} rounds):")
+    print(f"    Data transferred : {result.total_mb:.2f} MiB  "
+          f"(↑ {result.upload_bytes / (1024*1024):.2f} MiB  "
+          f"↓ {result.download_bytes / (1024*1024):.2f} MiB)")
+    print(f"    Comm time (sum)  : {result.total_time_s:.4f} s  "
+          f"(avg {result.avg_time_per_round:.4f} s/round)")
+    print(f"    Model size       : {result.model_size_bytes:,} B  "
+          f"({result.model_size_bytes / 1024:.1f} KiB)")
+
     execution_time_s = time.time() - start_time
+    print(f"  WALL-CLOCK EXECUTION : {execution_time_s:.1f} s  "
+          f"({execution_time_s/60:.2f} min)")
+
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_id = f"network_sim_{mode_name.replace(' ', '_').lower()}_{timestamp}"
-    
+
     run_info = {
         "type": "network_simulation",
         "mode": mode_name,
         "n_agents": n_agents,
         "n_edges": n_edges,
+        "model_size_bytes": model_size,
         "simulated_total_bytes": total['total_bytes'],
+        "simulated_upload_bytes": total['upload_bytes'],
+        "simulated_download_bytes": total['download_bytes'],
         "simulated_total_time_s": total['total_time_s'],
+        "simulated_avg_time_per_round_s": total.get('avg_time_per_round', 0),
+        "simulated_avg_bytes_per_round": total.get('avg_bytes_per_round', 0),
+        "n_transfers": total.get('n_transfers', 0),
         "config": config
     }
     log_execution_time(run_id, run_info, execution_time_s)
@@ -436,10 +462,7 @@ def run_comparison(config: dict = None,
     Returns:
         Dict with keys 'cloud_only' and 'hierarchical'.
     """
-    # base_cfg = {**DEFAULT_CONFIG, **(config or {})}
-    base_cfg = DEFAULT_CONFIG
-
-    print("base_cfg",  base_cfg)
+    base_cfg = {**DEFAULT_CONFIG, **(config or {})}
 
     # ── Mode A: Cloud-only ──
     cloud_cfg = {**base_cfg, 'n_edges': 0}
@@ -452,49 +475,50 @@ def run_comparison(config: dict = None,
     result_hier = run_network_simulation(hier_cfg)
 
     # ── Print comparison table ──
-    print(f"\n{'═'*70}")
+    print(f"\n{'═'*75}")
     print(f"  COMPARISON: Cloud-Only vs Hierarchical")
-    print(f"{'═'*70}")
-    print(f"{'Metric':<35} {'Cloud-Only':>15} {'Hierarchical':>15}")
-    print(f"{'─'*70}")
+    print(f"  (All times are SIMULATED network comm time, serial assumption)")
+    print(f"{'═'*75}")
+    print(f"{'Metric':<40} {'Cloud-Only':>15} {'Hierarchical':>15}")
+    print(f"{'─'*75}")
 
     rows = [
         ('Agents', f"{result_cloud.n_agents}", f"{result_hier.n_agents}"),
-        ('Edges', f"{result_cloud.n_edges}", f"{result_hier.n_edges}"),
-        ('Rounds', f"{result_cloud.n_rounds}", f"{result_hier.n_rounds}"),
-        ('Model size (KB)', f"{result_cloud.model_size_bytes/1024:.1f}",
-                            f"{result_hier.model_size_bytes/1024:.1f}"),
+        ('Edge servers', f"{result_cloud.n_edges}", f"{result_hier.n_edges}"),
+        ('FL rounds', f"{result_cloud.n_rounds}", f"{result_hier.n_rounds}"),
+        ('Model size (KiB)', f"{result_cloud.model_size_bytes/1024:.1f}",
+                              f"{result_hier.model_size_bytes/1024:.1f}"),
         ('', '', ''),
-        ('Total data (MB)', f"{result_cloud.total_mb:.2f}",
-                            f"{result_hier.total_mb:.2f}"),
-        ('Upload (MB)', f"{result_cloud.upload_bytes/(1024**2):.2f}",
-                        f"{result_hier.upload_bytes/(1024**2):.2f}"),
-        ('Download (MB)', f"{result_cloud.download_bytes/(1024**2):.2f}",
-                          f"{result_hier.download_bytes/(1024**2):.2f}"),
+        ('Total data transferred (MiB)', f"{result_cloud.total_mb:.2f}",
+                                         f"{result_hier.total_mb:.2f}"),
+        ('  ↑ Upload (MiB)', f"{result_cloud.upload_bytes/(1024**2):.2f}",
+                             f"{result_hier.upload_bytes/(1024**2):.2f}"),
+        ('  ↓ Download (MiB)', f"{result_cloud.download_bytes/(1024**2):.2f}",
+                               f"{result_hier.download_bytes/(1024**2):.2f}"),
         ('', '', ''),
-        ('Total time (s)', f"{result_cloud.total_time_s:.4f}",
-                           f"{result_hier.total_time_s:.4f}"),
-        ('Avg time/round (s)', f"{result_cloud.avg_time_per_round:.4f}",
-                               f"{result_hier.avg_time_per_round:.4f}"),
+        ('Simulated comm time, total (s)', f"{result_cloud.total_time_s:.4f}",
+                                           f"{result_hier.total_time_s:.4f}"),
+        ('Simulated comm time, per round (s)', f"{result_cloud.avg_time_per_round:.4f}",
+                                               f"{result_hier.avg_time_per_round:.4f}"),
     ]
 
     for label, cv, hv in rows:
         if label == '':
-            print(f"{'─'*70}")
+            print(f"{'─'*75}")
         else:
-            print(f"  {label:<33} {cv:>15} {hv:>15}")
+            print(f"  {label:<38} {cv:>15} {hv:>15}")
 
     # ── Savings ──
     if result_cloud.total_time_s > 0:
         time_savings = (1 - result_hier.total_time_s /
                         result_cloud.total_time_s) * 100
-        print(f"\n  ⏱  Hierarchical time savings: {time_savings:.1f}%")
+        print(f"\n  ⏱  Hierarchical comm time savings: {time_savings:.1f}%")
     if result_cloud.total_bytes > 0:
         data_savings = (1 - result_hier.total_bytes /
                         result_cloud.total_bytes) * 100
-        print(f"  📦 Hierarchical data savings:  {data_savings:.1f}%")
+        print(f"  📦 Hierarchical data savings:       {data_savings:.1f}%")
 
-    print(f"{'═'*70}\n")
+    print(f"{'═'*75}\n")
 
     # ── Optional CSV export ──
     results = {'cloud_only': result_cloud, 'hierarchical': result_hier}
@@ -523,7 +547,7 @@ def _save_csv(results: dict, path: str):
 # ─────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    import argparse
+
 
     parser = argparse.ArgumentParser(
         description='FL Network Communication Overhead Simulation')

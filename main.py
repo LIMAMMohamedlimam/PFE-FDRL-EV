@@ -128,11 +128,12 @@ def run_Q_learning_simulation(dev_mode=False):
                 a_idx = agent.get_action(s_t, eval_mode=False)
 
                 # Map action -> physical power (kW)
+                # 0=idle, 1=half-charge, 2=full-charge (no V2G discharge)
                 p_max = envs[i]._get_max_power(envs[i].soc)
                 if a_idx == 0:
-                    p_kw = -p_max
-                elif a_idx == 1:
                     p_kw = 0.0
+                elif a_idx == 1:
+                    p_kw = p_max * 0.5
                 else:
                     p_kw = p_max
 
@@ -150,7 +151,7 @@ def run_Q_learning_simulation(dev_mode=False):
             delta_ev_mw = ev_total_mw - prev_ev_total_mw
 
             # Log stability using controllable signal (EV only)
-            metrics.log_step(ev_total_mw)
+            metrics.log_step(base_load_mw + ev_total_mw)
 
             # Learning update (only active EVs)
             for i, agent in enumerate(agents):
@@ -254,7 +255,8 @@ def run_Q_learning_simulation(dev_mode=False):
                 a_idx = agent.get_action(s_t, eval_mode=True)
 
                 p_max = envs[i]._get_max_power(envs[i].soc)
-                p_kw = (-p_max if a_idx == 0 else (0.0 if a_idx == 1 else p_max))
+                # 0=idle, 1=half-charge, 2=full-charge (no V2G discharge)
+                p_kw = (0.0 if a_idx == 0 else (p_max * 0.5 if a_idx == 1 else p_max))
 
                 # cost
                 total_test_cost += p_kw * 1.0 * price_test

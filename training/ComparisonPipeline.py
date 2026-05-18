@@ -94,11 +94,11 @@ def _action_to_power(agent, action, env, policy):
     """Convert raw agent output to physical power (kW)."""
     p_max = env._get_max_power(env.soc)
     if policy == 'qlearning':
-        # Discrete: 0=discharge, 1=idle, 2=charge
+        # Discrete: 0=idle, 1=half-charge, 2=full-charge (no V2G discharge)
         if action == 0:
-            return -p_max
-        elif action == 1:
             return 0.0
+        elif action == 1:
+            return p_max * 0.5
         else:
             return p_max
     else:
@@ -404,9 +404,10 @@ def run_single_experiment(
             print(f"  [{combo_name}] Ep {episode+1} | AvgR: {avg_r:.2f} | Cost: ${total_cost:.2f}")
 
     # save models
-    model_dir = os.path.join("results/trained_models")
-    best_agent , agents_id = find_best_agent_by_reward(agents , policy)
-    save_agent_weights(best_agent,agents_id,model_dir)
+    if policy in ['ppo', 'sac']:
+        model_dir = os.path.join("results/trained_models")
+        best_agent , agents_id = find_best_agent_by_reward(agents , policy)
+        save_agent_weights(best_agent,agents_id,model_dir)
 
     # ══════════════════════════════════════════════════════════════════
     # TESTING
