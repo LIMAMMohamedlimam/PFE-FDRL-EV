@@ -35,6 +35,7 @@ from datetime import datetime
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from utils.config_loader import get_config
 from training.ComparisonPipeline import run_single_experiment, _method_cfg_to_kwargs
@@ -123,6 +124,19 @@ def extract_seed_metrics(metrics, seed: int) -> dict:
 # Single-method multi-seed runner
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _format_duration(seconds: float) -> str:
+    """Human-readable duration string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{int(m)}m {int(s)}s"
+    else:
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        return f"{int(h)}h {int(m)}m {int(s)}s"
+
+
 def run_multiseed_experiment(
     method_name: str,
     method_kwargs: dict,
@@ -138,21 +152,32 @@ def run_multiseed_experiment(
     method_dir = os.path.join(output_dir, safe_name)
     seed_results = []
 
-    for idx, seed in enumerate(seeds):
+    seed_pbar = tqdm(
+        enumerate(seeds), total=len(seeds),
+        desc=f"  Seeds ({method_name})",
+        unit="seed",
+        leave=True,
+        disable=not verbose,
+    )
+
+    method_t0 = time.time()
+
+    for idx, seed in seed_pbar:
         seed_label = f"seed_{seed}"
         seed_dir   = os.path.join(method_dir, seed_label)
         os.makedirs(seed_dir, exist_ok=True)
 
+        seed_pbar.set_postfix_str(f"seed={seed}")
         if verbose:
-            print(f"    [{method_name}] seed={seed}  ({idx+1}/{len(seeds)})")
+            tqdm.write(f"    ▶ [{method_name}] Starting seed={seed}  ({idx+1}/{len(seeds)})")
 
         set_global_seed(seed)
 
         try:
             t_start = time.time()
             metrics = run_single_experiment(
-                verbose=False,
-                progress_enabled=False,
+                verbose=verbose,
+                progress_enabled=verbose,
                 dev_mode=dev_mode,
                 **method_kwargs,
             )
@@ -177,9 +202,40 @@ def run_multiseed_experiment(
 
             seed_results.append(result)
 
+            # ── per-seed summary ────────────────────────────────────────────
+            if verbose:
+                sat_vals = result.get('satisfaction_curve', [])
+                avg_sat = float(np.mean(sat_vals[-10:])) if sat_vals else float('nan')
+                tqdm.write(
+                    f"    ✓ [{method_name}] seed={seed} done in {_format_duration(wall_time)} │ "
+                    f"TestReward={result['test_reward']:.2f}  "
+                    f"FinalSOC={result['final_soc']:.3f}  "
+                    f"Cost=${result['charging_cost']:.2f}  "
+                    f"ConvEp={result['convergence_episode']}  "
+                    f"Satisfaction={avg_sat:.3f}"
+                )
+
         except Exception as exc:
-            print(f"    [FAILED] {method_name} seed={seed}: {exc}")
+            tqdm.write(f"    ✗ [FAILED] {method_name} seed={seed}: {exc}")
             import traceback; traceback.print_exc()
+
+    seed_pbar.close()
+
+    # ── method-level summary ────────────────────────────────────────────────
+    method_elapsed = time.time() - method_t0
+    if verbose and seed_results:
+        test_rews = [r['test_reward'] for r in seed_results]
+        costs     = [r['charging_cost'] for r in seed_results]
+        socs      = [r['final_soc'] for r in seed_results]
+        times     = [r['wall_time_s'] for r in seed_results]
+        tqdm.write(
+            f"\n    ── {method_name} summary ({len(seed_results)}/{len(seeds)} seeds, "
+            f"total {_format_duration(method_elapsed)}) ──\n"
+            f"       TestReward : {np.mean(test_rews):8.2f} ± {np.std(test_rews):.2f}\n"
+            f"       FinalSOC   : {np.mean(socs):8.3f} ± {np.std(socs):.3f}\n"
+            f"       Cost       : ${np.mean(costs):7.2f} ± {np.std(costs):.2f}\n"
+            f"       WallTime   : {np.mean(times):8.1f}s ± {np.std(times):.1f}s per seed"
+        )
 
     return seed_results
 
@@ -234,18 +290,29 @@ def run_multiseed_pipeline(
 
     n_seeds   = len(seeds)
     n_methods = len(methods)
+    total_runs = n_methods * n_seeds
     print(f"\n{'='*65}")
-    print(f"  MULTI-SEED PIPELINE: {n_methods} methods × {n_seeds} seeds")
+    print(f"  MULTI-SEED PIPELINE: {n_methods} methods × {n_seeds} seeds = {total_runs} runs")
     print(f"  Seeds : {seeds}")
     print(f"  Mode  : {'dev' if dev_mode else 'full'}")
     print(f"  Output: {output_dir}")
     print(f"{'='*65}\n")
 
+    pipeline_t0 = time.time()
     all_results = {}
-    for method in methods:
+
+    method_pbar = tqdm(
+        methods, desc="Methods", unit="method",
+        leave=True, disable=not verbose,
+    )
+
+    for m_idx, method in enumerate(method_pbar):
         name   = method.get('name', 'unknown')
         kwargs = _method_cfg_to_kwargs(method)
-        print(f"\n--- {name} ---")
+        method_pbar.set_description(f"Methods [{name}]")
+        tqdm.write(f"\n{'─'*60}")
+        tqdm.write(f"  ▶ Method {m_idx+1}/{n_methods}: {name}")
+        tqdm.write(f"{'─'*60}")
         seed_results = run_multiseed_experiment(
             method_name=name,
             method_kwargs=kwargs,
@@ -255,7 +322,17 @@ def run_multiseed_pipeline(
             verbose=verbose,
         )
         all_results[name] = seed_results
-        print(f"  ✓ {name}: {len(seed_results)}/{n_seeds} seeds completed")
+
+        elapsed = time.time() - pipeline_t0
+        completed_methods = m_idx + 1
+        if completed_methods < n_methods:
+            eta = (elapsed / completed_methods) * (n_methods - completed_methods)
+            tqdm.write(f"  ✓ {name}: {len(seed_results)}/{n_seeds} seeds │ "
+                       f"Pipeline ETA: ~{_format_duration(eta)}")
+        else:
+            tqdm.write(f"  ✓ {name}: {len(seed_results)}/{n_seeds} seeds")
+
+    method_pbar.close()
 
     # ── save aggregated raw JSON (scalars only) ────────────────────────────
     agg_raw = {}
@@ -265,19 +342,24 @@ def run_multiseed_pipeline(
     with open(os.path.join(output_dir, 'aggregated_raw.json'), 'w') as f:
         json.dump(agg_raw, f, indent=2)
 
-    print(f"\n-> Raw results saved to {output_dir}/aggregated_raw.json")
+    pipeline_elapsed = time.time() - pipeline_t0
+    print(f"\n{'='*65}")
+    print(f"  PIPELINE COMPLETE in {_format_duration(pipeline_elapsed)}")
+    print(f"  Raw results saved to {output_dir}/aggregated_raw.json")
+    print(f"{'='*65}")
 
     # ── run statistical analysis + plotting ───────────────────────────────
     try:
         from utils.StatisticalAnalysis import StatisticalAnalysis
         from scripts.generate_multiseed_plots import generate_all_plots
 
+        print("\n  Running statistical analysis & plotting...")
         analysis = StatisticalAnalysis(all_results, agg_dir, ms_cfg)
         stats    = analysis.compute_and_save()
         generate_all_plots(all_results, stats, agg_dir, ms_cfg)
-        print(f"\n✓ Statistical analysis and plots written to {agg_dir}/")
+        print(f"  ✓ Statistical analysis and plots written to {agg_dir}/")
     except Exception as exc:
-        print(f"\n[WARNING] Post-processing failed: {exc}")
+        print(f"\n  [WARNING] Post-processing failed: {exc}")
         import traceback; traceback.print_exc()
 
     return all_results, output_dir

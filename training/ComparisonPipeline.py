@@ -41,17 +41,25 @@ from utils.config_loader import get_config
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
 
-def _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power):
-    """Create EV environments and matching driver profiles."""
+def _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power, fixed_dwell_hours=None):
+    """Create EV environments and matching driver profiles.
+
+    Args:
+        fixed_dwell_hours: When set, overrides every agent's t_dep with this
+                           value (used by the dwell-time study).
+    """
     profiles = DataGenerator.get_nhts_profile(n_agents)
     envs = []
     for i in range(n_agents):
+        t_dep = int(fixed_dwell_hours) if fixed_dwell_hours is not None else profiles[i]['duration']
+        if fixed_dwell_hours is not None:
+            profiles[i]['duration'] = t_dep  # keep profile consistent for SWIFT
         cfg = {
             'capacity': ev_capacity,
             'max_power': ev_max_power,
             'initial_soc': profiles[i]['soc_init'],
             'soc_req': profiles[i]['soc_req'],
-            't_dep': profiles[i]['duration'],
+            't_dep': t_dep,
             'dt': 1.0,
         }
         envs.append(EVClientEnv(cfg))
@@ -145,6 +153,8 @@ def run_single_experiment(
     mu_fedprox=0.01,          # FedProx proximal coefficient
     beta_momentum=0.9,        # FedAvgM momentum coefficient
     adam_lr=0.01,             # FedAdam server learning rate
+    dwell_time_hours=None,    # Dwell-time study: fix all agents' t_dep + sim_hours to this value
+    swift_min_stay_override=None,  # Dwell-time study: override swift.yaml min_stay_hours
     **extra_cfg,
 ):
     print("Running single experiment... {policy} {aggregation}")
@@ -164,7 +174,8 @@ def run_single_experiment(
     n_episodes = train_cfg.get('num_episodes', 300)
     n_test_episodes = train_cfg.get('num_test_episodes', 10)
     n_agents = train_cfg.get('num_agents', 10)
-    sim_hours = train_cfg.get('simulation_hours', 24)
+    sim_hours = int(dwell_time_hours) if dwell_time_hours is not None \
+                else train_cfg.get('simulation_hours', 24)
     grid_type = train_cfg.get('grid_type', 'case33bw')
     
     ev_capacity = env_cfg.get('battery_capacity', 60.0)
@@ -211,7 +222,8 @@ def run_single_experiment(
 
     metrics = EvalMetrics(run_name=run_name, config=sim_config)
     grid = GridEnv(network_type=grid_type)
-    envs, profiles = _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power)
+    envs, profiles = _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power,
+                                              fixed_dwell_hours=dwell_time_hours)
     agent_bus_map = {i: (i % 30) + 2 for i in range(n_agents)}
 
     # Input dimension probe
@@ -239,6 +251,9 @@ def run_single_experiment(
     if use_swift:
         from training.SWIFTScheduler import SWIFTScheduler
         swift_cfg = get_config('swift')
+        if swift_min_stay_override is not None:
+            swift_cfg = dict(swift_cfg)  # shallow copy to avoid mutating global cache
+            swift_cfg['min_stay_hours'] = swift_min_stay_override
         scheduler = SWIFTScheduler(n_agents=n_agents, config=swift_cfg)
         if verbose:
             print(f"  [{combo_name}] SWIFT: fraction={swift_cfg['fraction']}, "

@@ -25,6 +25,7 @@ from training.ComparisonPipeline import (
     run_methods_from_config,
 )
 from training.MultiSeedRunner import run_multiseed_pipeline
+from training.DwellTimeStudy import run_dwell_time_study
 
 
 def run_Q_learning_simulation(dev_mode=False):
@@ -1381,6 +1382,40 @@ def run_sac_centralized_simulation(dev_mode=False):
     m.plot_metrics()
 
 
+def run_dwell_study(dev_mode=False):
+    """SWIFT dwell-time analysis — FedAvg vs SWIFT vs HFDRL across 1h/2h/4h/6h windows."""
+    print("\n>>> SWIFT Dwell-Time Study")
+    from utils.config_loader import get_config as _gc
+    cfg = _gc('dwell_time_study')
+
+    n_seeds_choice = questionary.select(
+        "Number of seeds:",
+        choices=[
+            questionary.Choice("5  seeds  (minimum)", value=5),
+            questionary.Choice("10 seeds  (AAAI preferred)", value=10),
+        ]
+    ).ask()
+    if n_seeds_choice is None:
+        sys.exit(0)
+
+    seed_sets = {5: [0, 1, 2, 3, 4], 10: [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]}
+    seeds = seed_sets[n_seeds_choice]
+
+    dwell_choice = questionary.select(
+        "Dwell-time scenarios to run:",
+        choices=[
+            questionary.Choice("All four  (1h, 2h, 4h, 6h)", value=[1, 2, 4, 6]),
+            questionary.Choice("Short only (1h, 2h)", value=[1, 2]),
+            questionary.Choice("Quick test (2h, 6h)", value=[2, 6]),
+        ]
+    ).ask()
+    if dwell_choice is None:
+        sys.exit(0)
+
+    print(f"\n>>> Seeds: {seeds}  |  Dwell scenarios: {dwell_choice}h  |  Mode: {'dev' if dev_mode else 'full'}")
+    run_dwell_time_study(seeds=seeds, dwell_hours_list=dwell_choice, dev_mode=dev_mode)
+
+
 def run_multiseed_evaluation(dev_mode=False):
     """Multi-seed statistical evaluation pipeline for AAAI publication."""
     print("\n>>> Multi-Seed Statistical Evaluation")
@@ -1486,6 +1521,7 @@ def main():
                     questionary.Choice("SAC Centralized Oracle", value=15),
                     questionary.Choice("── Statistics ─────────────────────────", value=-2),
                     questionary.Choice("Multi-Seed Statistical Evaluation (AAAI)", value=16),
+                    questionary.Choice("SWIFT Dwell-Time Study (AAAI)", value=17),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1511,6 +1547,7 @@ def main():
                     questionary.Choice("SAC Centralized Oracle (dev)", value=15),
                     questionary.Choice("── Statistics ─────────────────────────", value=-2),
                     questionary.Choice("Multi-Seed Statistical Evaluation (AAAI) (dev)", value=16),
+                    questionary.Choice("SWIFT Dwell-Time Study (AAAI) (dev)", value=17),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1553,6 +1590,8 @@ def main():
             run_sac_centralized_simulation()
         elif args.simulation == 16:
             run_multiseed_evaluation()
+        elif args.simulation == 17:
+            run_dwell_study()
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
@@ -1594,6 +1633,8 @@ def main():
             run_sac_centralized_simulation(dev_mode=True)
         elif args.simulation == 16:
             run_multiseed_evaluation(dev_mode=True)
+        elif args.simulation == 17:
+            run_dwell_study(dev_mode=True)
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
