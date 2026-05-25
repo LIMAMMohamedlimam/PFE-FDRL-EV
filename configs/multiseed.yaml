@@ -1,0 +1,36 @@
+# multiseed.yaml
+# Multi-seed statistical evaluation configuration for AAAI publication
+
+# Random seeds to run each method over (10 preferred for AAAI)
+seeds: [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]
+
+# Output base directory
+output_base: "results/multi_seed"
+
+# Statistical settings
+ci_z: 1.96          # z-score for 95% CI: CI = z * std / sqrt(n)
+alpha: 0.05         # significance level for hypothesis tests
+
+# Voltage violation threshold (per-unit; matches GridEnv.v_max)
+voltage_threshold_pu: 1.05
+
+# Convergence detection
+convergence_window: 10          # moving-average window (episodes)
+convergence_threshold: 0.90     # fraction of final avg considered "converged"
+
+# Smoothing for learning curves in plots
+smooth_window: 10
+
+# AAAI plot formatting
+plot:
+  dpi: 300
+  font_family: "serif"
+  font_size: 9
+  title_size: 10
+  legend_size: 8
+  label_size: 9
+  line_width: 1.5
+  ci_alpha: 0.18              # shading transparency for CI bands
+  figsize_single: [3.33, 2.6] # inches — AAAI single column
+  figsize_double: [7.0, 2.6]  # inches — AAAI double column
+  figsize_wide: [7.0, 4.2]    # inches — AAAI double column, taller

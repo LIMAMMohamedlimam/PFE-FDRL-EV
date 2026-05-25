@@ -35,13 +35,13 @@ real_prices_csv: "data/iso_ne_prices_real.csv" # Path to the ISO-NE style CSV (r
 methods:
 
   # ── Existing: main HFDRL method ──────────────────────────────────────────
-  - name: "SAC HFedAvg SWIFT LoRA"
-    agent: sac
-    use_lora: true
-    use_swift: true
-    federated:
-      enabled: true
-      aggregation: fedavg
+  # - name: "SAC HFedAvg SWIFT LoRA"
+  #   agent: sac
+  #   use_lora: true
+  #   use_swift: true
+  #   federated:
+  #     enabled: true
+  #     aggregation: fedavg
 
   # ── Category 2: Federated aggregation variants ───────────────────────────
   - name: "SAC FedProx"
