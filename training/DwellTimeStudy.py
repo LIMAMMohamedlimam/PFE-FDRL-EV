@@ -25,6 +25,9 @@ Usage
     # Quick smoke test
     python -m training.DwellTimeStudy --dev --seeds 0 1
 
+    # Single (method, dwell, seed) triple — fully standalone
+    python -m training.DwellTimeStudy --single --method "SWIFT-SAC" --dwell 2 --seed 3
+
     # Via interactive menu (main.py → option 17)
     python main.py
 """
@@ -33,12 +36,13 @@ import os
 import sys
 import json
 import time
-import random
+import logging
 import argparse
 from datetime import datetime
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from utils.config_loader import get_config
 from training.MultiSeedRunner import set_global_seed, extract_seed_metrics
@@ -49,7 +53,6 @@ from training.ComparisonPipeline import run_single_experiment
 # Study constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Methods in the same format as training.yaml (converted to kwargs internally)
 STUDY_METHODS = [
     {
         'name': 'FedAvg-SAC',
@@ -74,6 +77,50 @@ STUDY_METHODS = [
     },
 ]
 
+METHOD_BY_NAME = {m['name']: m for m in STUDY_METHODS}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging setup
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _setup_logger(output_dir: str) -> logging.Logger:
+    """Create a logger that writes to both stdout and a log file immediately."""
+    logger = logging.getLogger('dwell_study')
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    fmt = logging.Formatter('%(asctime)s  %(levelname)-7s  %(message)s',
+                            datefmt='%H:%M:%S')
+
+    # Console handler — use tqdm.write so it doesn't break progress bars
+    class TqdmHandler(logging.StreamHandler):
+        def emit(self, record):
+            try:
+                tqdm.write(self.format(record))
+            except Exception:
+                self.handleError(record)
+
+    ch = TqdmHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+
+    # File handler — flushed after every record
+    os.makedirs(output_dir, exist_ok=True)
+    log_path = os.path.join(output_dir, 'study.log')
+    fh = logging.FileHandler(log_path, mode='a')
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    fh.terminator = '\n'
+    logger.addHandler(fh)
+
+    return logger
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _load_study_cfg() -> dict:
     try:
@@ -83,7 +130,6 @@ def _load_study_cfg() -> dict:
 
 
 def _method_kwargs(method: dict, dwell_hours: int, swift_min_stay: float) -> dict:
-    """Build run_single_experiment kwargs for one method at one dwell scenario."""
     return dict(
         policy=method['policy'],
         aggregation=method['aggregation'],
@@ -95,7 +141,7 @@ def _method_kwargs(method: dict, dwell_hours: int, swift_min_stay: float) -> dic
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-seed runner
+# Per-seed runner  (used by both single-triple and full-study paths)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_one_seed(
@@ -105,7 +151,7 @@ def _run_one_seed(
     seed: int,
     seed_dir: str,
     dev_mode: bool,
-    verbose: bool,
+    logger: logging.Logger,
 ) -> dict:
     """Run one (method, dwell, seed) triple. Returns metric dict or None on failure."""
     set_global_seed(seed)
@@ -120,18 +166,17 @@ def _run_one_seed(
             **kwargs,
         )
     except Exception as exc:
-        print(f"      [FAILED] {method['name']} dwell={dwell_hours}h seed={seed}: {exc}")
-        import traceback; traceback.print_exc()
+        logger.error(f"FAILED {method['name']} dwell={dwell_hours}h seed={seed}: {exc}",
+                     exc_info=True)
         return None
 
     wall_time = time.time() - t0
     result = extract_seed_metrics(metrics, seed)
-    result['wall_time_s'] = wall_time
+    result['wall_time_s'] = round(wall_time, 2)
     result['dwell_hours'] = dwell_hours
 
     os.makedirs(seed_dir, exist_ok=True)
 
-    # Persist curves as .npy
     np.save(os.path.join(seed_dir, 'reward_curve.npy'),
             np.array(result['reward_curve'], dtype=np.float32))
     np.save(os.path.join(seed_dir, 'cost_curve.npy'),
@@ -139,17 +184,121 @@ def _run_one_seed(
     np.save(os.path.join(seed_dir, 'satisfaction_curve.npy'),
             np.array(result['satisfaction_curve'], dtype=np.float32))
 
-    # Persist scalars as JSON
     scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
     scalars['n_reward_episodes'] = len(result['reward_curve'])
     with open(os.path.join(seed_dir, 'metrics.json'), 'w') as f:
         json.dump(scalars, f, indent=2)
 
+    logger.debug(f"  saved metrics -> {seed_dir}/metrics.json")
     return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main pipeline
+# Progress log  (written after every seed, readable while study runs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _append_progress(progress_path: str, entry: dict) -> None:
+    """Append one JSON line to the rolling progress log."""
+    with open(progress_path, 'a') as f:
+        f.write(json.dumps(entry) + '\n')
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _update_aggregated_raw(raw_path: str, all_results: dict) -> None:
+    """Rewrite aggregated_raw.json with current state (called after each method)."""
+    agg_raw = {}
+    for dwell_h, methods_dict in all_results.items():
+        agg_raw[str(dwell_h)] = {}
+        for mname, seed_list in methods_dict.items():
+            agg_raw[str(dwell_h)][mname] = [
+                {k: v for k, v in r.items() if not isinstance(v, list)}
+                for r in seed_list
+            ]
+    tmp = raw_path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(agg_raw, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, raw_path)  # atomic on POSIX
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single-triple entry point  (fully standalone — no full study needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_single_triple(
+    method_name: str,
+    dwell_hours: int,
+    seed: int,
+    dev_mode: bool = False,
+    output_base: str = None,
+) -> dict:
+    """
+    Run exactly one (method, dwell_hours, seed) combination independently.
+
+    Parameters
+    ----------
+    method_name  : One of 'FedAvg-SAC', 'SWIFT-SAC', 'HFDRL'
+    dwell_hours  : One of 1, 2, 4, 6
+    seed         : Integer seed
+    dev_mode     : Use training_dev.yaml
+    output_base  : Root directory (defaults to results/dwell_time_study)
+
+    Returns
+    -------
+    Metric dict (scalars + curves) or None on failure.
+    """
+    if method_name not in METHOD_BY_NAME:
+        raise ValueError(f"Unknown method '{method_name}'. Choose from: {list(METHOD_BY_NAME)}")
+
+    cfg = _load_study_cfg()
+    if output_base is None:
+        output_base = cfg.get('output_base', 'results/dwell_time_study')
+
+    swift_min_stay_map = {int(k): float(v) for k, v in
+                          cfg.get('swift_min_stay', {1: 0.0, 2: 0.5, 4: 1.0, 6: 1.5}).items()}
+    swift_min_stay = swift_min_stay_map.get(dwell_hours, 0.0)
+
+    method = METHOD_BY_NAME[method_name]
+    safe_mname = method_name.replace(' ', '_').replace('/', '-')
+
+    seed_dir = os.path.join(
+        output_base, 'singles',
+        f'dwell_{dwell_hours}h', safe_mname, f'seed_{seed}'
+    )
+    os.makedirs(seed_dir, exist_ok=True)
+
+    logger = _setup_logger(seed_dir)
+    logger.info(f"Single-triple run: method={method_name}  dwell={dwell_hours}h  seed={seed}"
+                f"  mode={'dev' if dev_mode else 'full'}")
+    logger.info(f"Output -> {seed_dir}")
+
+    with tqdm(total=1, desc=f"{method_name} dwell={dwell_hours}h seed={seed}",
+              unit='run', ncols=80) as pbar:
+        result = _run_one_seed(
+            method=method,
+            dwell_hours=dwell_hours,
+            swift_min_stay=swift_min_stay,
+            seed=seed,
+            seed_dir=seed_dir,
+            dev_mode=dev_mode,
+            logger=logger,
+        )
+        pbar.update(1)
+
+    if result is not None:
+        scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
+        logger.info(f"Done — reward={scalars.get('mean_reward', 'N/A'):.3f}"
+                    f"  wall={result['wall_time_s']:.1f}s")
+    else:
+        logger.error("Run failed — check study.log for details.")
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Full study pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_dwell_time_study(
@@ -161,22 +310,20 @@ def run_dwell_time_study(
     method_filter: list = None,
 ) -> tuple:
     """
-    Run the full dwell-time study.
+    Run the full dwell-time study with on-the-go logging and incremental saves.
 
     Parameters
     ----------
     seeds           : List of random seeds. None → read from dwell_time_study.yaml.
     dwell_hours_list: List of dwell durations. None → read from config.
     dev_mode        : Use training_dev.yaml (fewer episodes, faster).
-    verbose         : Print progress.
+    verbose         : Print per-seed lines in addition to tqdm bars.
     output_base     : Root output directory. None → config default.
     method_filter   : If given, only run methods in this list.
 
     Returns
     -------
     (all_results, output_dir)
-    all_results : {dwell_h: {method_name: [seed_metric_dicts]}}
-    output_dir  : timestamped path where everything is saved
     """
     cfg = _load_study_cfg()
 
@@ -187,11 +334,8 @@ def run_dwell_time_study(
     if output_base is None:
         output_base = cfg.get('output_base', 'results/dwell_time_study')
 
-    swift_min_stay_map = cfg.get('swift_min_stay', {
-        1: 0.0, 2: 0.5, 4: 1.0, 6: 1.5
-    })
-    # YAML keys are strings; convert to int
-    swift_min_stay_map = {int(k): float(v) for k, v in swift_min_stay_map.items()}
+    swift_min_stay_map = {int(k): float(v) for k, v in
+                          cfg.get('swift_min_stay', {1: 0.0, 2: 0.5, 4: 1.0, 6: 1.5}).items()}
 
     methods = [m for m in STUDY_METHODS
                if method_filter is None or m['name'] in method_filter]
@@ -202,42 +346,55 @@ def run_dwell_time_study(
     for sub in ('tables', 'plots', 'statistics'):
         os.makedirs(os.path.join(agg_dir, sub), exist_ok=True)
 
-    _save_reproducibility_notes(output_dir, seeds, dwell_hours_list, dev_mode)
+    logger = _setup_logger(output_dir)
+    progress_path = os.path.join(output_dir, 'progress.jsonl')
+    raw_path      = os.path.join(output_dir, 'aggregated_raw.json')
+
+    _save_reproducibility_notes(output_dir, seeds, dwell_hours_list, dev_mode, logger)
 
     n_total = len(dwell_hours_list) * len(methods) * len(seeds)
-    print(f"\n{'='*68}")
-    print(f"  DWELL-TIME STUDY")
-    print(f"  Scenarios : {dwell_hours_list}h")
-    print(f"  Methods   : {[m['name'] for m in methods]}")
-    print(f"  Seeds     : {seeds}")
-    print(f"  Total runs: {n_total}  ({'dev' if dev_mode else 'full'} mode)")
-    print(f"  Output    : {output_dir}")
-    print(f"{'='*68}\n")
+    logger.info('=' * 60)
+    logger.info('DWELL-TIME STUDY')
+    logger.info(f"Scenarios : {dwell_hours_list}h")
+    logger.info(f"Methods   : {[m['name'] for m in methods]}")
+    logger.info(f"Seeds     : {seeds}")
+    logger.info(f"Total runs: {n_total}  ({'dev' if dev_mode else 'full'} mode)")
+    logger.info(f"Output    : {output_dir}")
+    logger.info('=' * 60)
 
-    # {dwell_h: {method_name: [seed_metrics]}}
     all_results: dict = {}
 
-    for dwell_h in dwell_hours_list:
+    overall_bar = tqdm(
+        total=n_total,
+        desc='Overall',
+        unit='run',
+        ncols=90,
+        position=0,
+        leave=True,
+    )
+
+    for dwell_h in tqdm(dwell_hours_list, desc='Dwell scenarios', unit='h',
+                        ncols=90, position=1, leave=False):
         swift_min_stay = swift_min_stay_map.get(dwell_h, 0.0)
-        dwell_key = dwell_h
-        all_results[dwell_key] = {}
+        all_results[dwell_h] = {}
 
         dwell_dir = os.path.join(output_dir, f'dwell_{dwell_h}h')
         os.makedirs(dwell_dir, exist_ok=True)
 
-        print(f"\n── Dwell = {dwell_h}h (SWIFT min_stay={swift_min_stay}h) ──")
+        logger.info(f"── Dwell = {dwell_h}h  (SWIFT min_stay={swift_min_stay}h) ──")
 
-        for method in methods:
+        for method in tqdm(methods, desc=f'Methods @{dwell_h}h', unit='method',
+                           ncols=90, position=2, leave=False):
             mname = method['name']
             safe_mname = mname.replace(' ', '_').replace('/', '-')
-            all_results[dwell_key][mname] = []
-
+            all_results[dwell_h][mname] = []
             method_dir = os.path.join(dwell_dir, safe_mname)
 
-            for idx, seed in enumerate(seeds):
+            for seed in tqdm(seeds, desc=f'{mname}', unit='seed',
+                             ncols=90, position=3, leave=False):
                 seed_dir = os.path.join(method_dir, f'seed_{seed}')
-                if verbose:
-                    print(f"  [{mname}] dwell={dwell_h}h  seed={seed}  ({idx+1}/{len(seeds)})")
+
+                logger.debug(f"  starting {mname} dwell={dwell_h}h seed={seed}")
 
                 result = _run_one_seed(
                     method=method,
@@ -246,36 +403,56 @@ def run_dwell_time_study(
                     seed=seed,
                     seed_dir=seed_dir,
                     dev_mode=dev_mode,
-                    verbose=verbose,
+                    logger=logger,
                 )
+
+                status = 'ok' if result is not None else 'failed'
                 if result is not None:
-                    all_results[dwell_key][mname].append(result)
+                    all_results[dwell_h][mname].append(result)
+                    scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
+                    logger.info(
+                        f"  [{mname}] dwell={dwell_h}h seed={seed}  "
+                        f"reward={scalars.get('mean_reward', float('nan')):.3f}  "
+                        f"wall={result['wall_time_s']:.1f}s"
+                    )
+                else:
+                    logger.warning(f"  [{mname}] dwell={dwell_h}h seed={seed}  FAILED")
 
-            n_ok = len(all_results[dwell_key][mname])
-            print(f"  ✓ {mname} @ {dwell_h}h: {n_ok}/{len(seeds)} seeds")
+                # Write progress immediately after each seed
+                _append_progress(progress_path, {
+                    'ts': datetime.now().isoformat(),
+                    'method': mname,
+                    'dwell_h': dwell_h,
+                    'seed': seed,
+                    'status': status,
+                    'wall_time_s': result['wall_time_s'] if result else None,
+                    'mean_reward': (
+                        {k: v for k, v in result.items() if not isinstance(v, list)}
+                        .get('mean_reward') if result else None
+                    ),
+                })
+                overall_bar.update(1)
 
-    # ── Save aggregated raw JSON ───────────────────────────────────────────────
-    agg_raw = {}
-    for dwell_h, methods_dict in all_results.items():
-        agg_raw[str(dwell_h)] = {}
-        for mname, seed_list in methods_dict.items():
-            agg_raw[str(dwell_h)][mname] = [
-                {k: v for k, v in r.items() if not isinstance(v, list)}
-                for r in seed_list
-            ]
-    raw_path = os.path.join(output_dir, 'aggregated_raw.json')
-    with open(raw_path, 'w') as f:
-        json.dump(agg_raw, f, indent=2)
-    print(f"\n-> Raw results saved to {raw_path}")
+            n_ok = len(all_results[dwell_h][mname])
+            logger.info(f"  ✓ {mname} @ {dwell_h}h: {n_ok}/{len(seeds)} seeds complete")
+
+            # Incrementally persist aggregated results after every method
+            _update_aggregated_raw(raw_path, all_results)
+            logger.debug(f"  aggregated_raw.json updated -> {raw_path}")
+
+    overall_bar.close()
+
+    logger.info(f"\nRaw results: {raw_path}")
+    logger.info(f"Progress log: {progress_path}")
 
     # ── Post-processing: stats + plots ────────────────────────────────────────
     try:
         from scripts.generate_dwell_plots import generate_all_dwell_plots
+        logger.info("Running post-processing (plots + tables)…")
         generate_all_dwell_plots(all_results, agg_dir, cfg)
-        print(f"\n✓ Plots and tables written to {agg_dir}/")
+        logger.info(f"Plots and tables written to {agg_dir}/")
     except Exception as exc:
-        print(f"\n[WARNING] Post-processing failed: {exc}")
-        import traceback; traceback.print_exc()
+        logger.warning(f"Post-processing failed: {exc}", exc_info=True)
 
     return all_results, output_dir
 
@@ -289,19 +466,20 @@ def _save_reproducibility_notes(
     seeds: list,
     dwell_hours: list,
     dev_mode: bool,
+    logger: logging.Logger,
 ) -> None:
     notes = {
-        'timestamp':      datetime.now().isoformat(),
-        'study':          'SWIFT Dwell-Time Analysis',
-        'seeds':          seeds,
-        'n_seeds':        len(seeds),
+        'timestamp':       datetime.now().isoformat(),
+        'study':           'SWIFT Dwell-Time Analysis',
+        'seeds':           seeds,
+        'n_seeds':         len(seeds),
         'dwell_scenarios': dwell_hours,
-        'methods':        [m['name'] for m in STUDY_METHODS],
-        'dev_mode':       dev_mode,
-        'python_version': sys.version,
-        'numpy_version':  np.__version__,
-        'torch_version':  torch.__version__,
-        'cuda_available': torch.cuda.is_available(),
+        'methods':         [m['name'] for m in STUDY_METHODS],
+        'dev_mode':        dev_mode,
+        'python_version':  sys.version,
+        'numpy_version':   np.__version__,
+        'torch_version':   torch.__version__,
+        'cuda_available':  torch.cuda.is_available(),
         'rng_control': {
             'python_random': 'random.seed(seed)',
             'numpy':         'np.random.seed(seed)',
@@ -322,7 +500,7 @@ def _save_reproducibility_notes(
     path = os.path.join(output_dir, 'reproducibility_notes.json')
     with open(path, 'w') as f:
         json.dump(notes, f, indent=2)
-    print(f"-> Reproducibility notes saved to {path}")
+    logger.info(f"Reproducibility notes -> {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -331,19 +509,49 @@ def _save_reproducibility_notes(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='SWIFT Dwell-Time Study')
-    parser.add_argument('--dev',    action='store_true',
+    parser.add_argument('--dev', action='store_true',
                         help='Use dev config (fewer episodes, faster)')
-    parser.add_argument('--seeds',  type=int, nargs='+',
-                        help='Override seed list (e.g. --seeds 0 1 2)')
-    parser.add_argument('--dwell',  type=int, nargs='+',
+
+    # Full-study options
+    parser.add_argument('--seeds',   type=int, nargs='+',
+                        help='Override seed list  (e.g. --seeds 0 1 2)')
+    parser.add_argument('--dwell',   type=int, nargs='+',
                         help='Override dwell hours (e.g. --dwell 1 2 4 6)')
     parser.add_argument('--methods', type=str, nargs='+',
                         help='Run only these methods (e.g. --methods "FedAvg-SAC" "SWIFT-SAC")')
+
+    # Single-triple mode
+    parser.add_argument('--single', action='store_true',
+                        help='Run exactly one (method, dwell, seed) triple and exit')
+    parser.add_argument('--method', type=str,
+                        help='[--single] Method name: FedAvg-SAC | SWIFT-SAC | HFDRL')
+    parser.add_argument('--dwell-single', type=int, dest='dwell_single',
+                        help='[--single] Dwell hours: 1 | 2 | 4 | 6')
+    parser.add_argument('--seed-single', type=int, dest='seed_single',
+                        help='[--single] Seed integer')
+    parser.add_argument('--output-base', type=str, dest='output_base',
+                        help='Root output directory (overrides config)')
+
     args = parser.parse_args()
 
-    run_dwell_time_study(
-        seeds=args.seeds,
-        dwell_hours_list=args.dwell,
-        dev_mode=args.dev,
-        method_filter=args.methods,
-    )
+    if args.single:
+        missing = [f for f, v in [('--method', args.method),
+                                   ('--dwell-single', args.dwell_single),
+                                   ('--seed-single', args.seed_single)] if v is None]
+        if missing:
+            parser.error(f"--single requires: {', '.join(missing)}")
+        run_single_triple(
+            method_name=args.method,
+            dwell_hours=args.dwell_single,
+            seed=args.seed_single,
+            dev_mode=args.dev,
+            output_base=args.output_base,
+        )
+    else:
+        run_dwell_time_study(
+            seeds=args.seeds,
+            dwell_hours_list=args.dwell,
+            dev_mode=args.dev,
+            method_filter=args.methods,
+            output_base=args.output_base,
+        )

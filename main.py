@@ -1384,7 +1384,62 @@ def run_sac_centralized_simulation(dev_mode=False):
 
 def run_dwell_study(dev_mode=False):
     """SWIFT dwell-time analysis — FedAvg vs SWIFT vs HFDRL across 1h/2h/4h/6h windows."""
+    from training.DwellTimeStudy import run_single_triple
     print("\n>>> SWIFT Dwell-Time Study")
+
+    run_mode = questionary.select(
+        "Run mode:",
+        choices=[
+            questionary.Choice("Full study  (all methods × dwells × seeds)", value='full'),
+            questionary.Choice("Single run  (pick one method, dwell, seed)", value='single'),
+        ]
+    ).ask()
+    if run_mode is None:
+        sys.exit(0)
+
+    if run_mode == 'single':
+        method_choice = questionary.select(
+            "Method:",
+            choices=[
+                questionary.Choice("FedAvg-SAC  (baseline federated)", value='FedAvg-SAC'),
+                questionary.Choice("SWIFT-SAC   (smart selection)",     value='SWIFT-SAC'),
+                questionary.Choice("HFDRL       (SWIFT + LoRA)",        value='HFDRL'),
+            ]
+        ).ask()
+        if method_choice is None:
+            sys.exit(0)
+
+        dwell_choice = questionary.select(
+            "Dwell-time scenario:",
+            choices=[
+                questionary.Choice("1h  (very short window)", value=1),
+                questionary.Choice("2h",                      value=2),
+                questionary.Choice("4h",                      value=4),
+                questionary.Choice("6h  (long window)",       value=6),
+            ]
+        ).ask()
+        if dwell_choice is None:
+            sys.exit(0)
+
+        seed_choice = questionary.select(
+            "Seed:",
+            choices=[questionary.Choice(str(s), value=s)
+                     for s in [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]]
+        ).ask()
+        if seed_choice is None:
+            sys.exit(0)
+
+        print(f"\n>>> method={method_choice}  dwell={dwell_choice}h  seed={seed_choice}"
+              f"  mode={'dev' if dev_mode else 'full'}")
+        run_single_triple(
+            method_name=method_choice,
+            dwell_hours=dwell_choice,
+            seed=seed_choice,
+            dev_mode=dev_mode,
+        )
+        return
+
+    # ── Full study ────────────────────────────────────────────────────────────
     from utils.config_loader import get_config as _gc
     cfg = _gc('dwell_time_study')
 
@@ -1405,15 +1460,28 @@ def run_dwell_study(dev_mode=False):
         "Dwell-time scenarios to run:",
         choices=[
             questionary.Choice("All four  (1h, 2h, 4h, 6h)", value=[1, 2, 4, 6]),
-            questionary.Choice("Short only (1h, 2h)", value=[1, 2]),
-            questionary.Choice("Quick test (2h, 6h)", value=[2, 6]),
+            questionary.Choice("Short only (1h, 2h)",         value=[1, 2]),
+            questionary.Choice("Quick test (2h, 6h)",         value=[2, 6]),
         ]
     ).ask()
     if dwell_choice is None:
         sys.exit(0)
 
-    print(f"\n>>> Seeds: {seeds}  |  Dwell scenarios: {dwell_choice}h  |  Mode: {'dev' if dev_mode else 'full'}")
-    run_dwell_time_study(seeds=seeds, dwell_hours_list=dwell_choice, dev_mode=dev_mode)
+    method_filter = questionary.checkbox(
+        "Limit to specific methods? (space to toggle, enter to confirm all):",
+        choices=[
+            questionary.Choice("FedAvg-SAC", value='FedAvg-SAC', checked=True),
+            questionary.Choice("SWIFT-SAC",  value='SWIFT-SAC',  checked=True),
+            questionary.Choice("HFDRL",      value='HFDRL',      checked=True),
+        ]
+    ).ask()
+    if not method_filter:
+        sys.exit(0)
+
+    print(f"\n>>> Seeds: {seeds}  |  Dwell: {dwell_choice}h  |  Methods: {method_filter}"
+          f"  |  Mode: {'dev' if dev_mode else 'full'}")
+    run_dwell_time_study(seeds=seeds, dwell_hours_list=dwell_choice,
+                         method_filter=method_filter, dev_mode=dev_mode)
 
 
 def run_multiseed_evaluation(dev_mode=False):
