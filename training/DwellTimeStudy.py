@@ -288,9 +288,9 @@ def run_single_triple(
 
     if result is not None:
         scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
-        reward = scalars.get('mean_reward')
+        reward = scalars.get('test_reward')
         reward_str = f"{reward:.3f}" if reward is not None else "N/A"
-        logger.info(f"Done — reward={reward_str}  wall={result['wall_time_s']:.1f}s")
+        logger.info(f"Done — test_reward={reward_str}  wall={result['wall_time_s']:.1f}s")
     else:
         logger.error("Run failed — check study.log for details.")
 
@@ -412,7 +412,7 @@ def run_dwell_time_study(
                     scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
                     logger.info(
                         f"  [{mname}] dwell={dwell_h}h seed={seed}  "
-                        f"reward={scalars.get('mean_reward', float('nan')):.3f}  "
+                        f"test_reward={scalars.get('test_reward', float('nan')):.3f}  "
                         f"wall={result['wall_time_s']:.1f}s"
                     )
                 else:
@@ -426,9 +426,9 @@ def run_dwell_time_study(
                     'seed': seed,
                     'status': status,
                     'wall_time_s': result['wall_time_s'] if result else None,
-                    'mean_reward': (
+                    'test_reward': (
                         {k: v for k, v in result.items() if not isinstance(v, list)}
-                        .get('mean_reward') if result else None
+                        .get('test_reward') if result else None
                     ),
                 })
                 overall_bar.update(1)

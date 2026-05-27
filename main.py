@@ -1463,6 +1463,10 @@ def run_dwell_study(dev_mode=False):
             questionary.Choice("All four  (1h, 2h, 4h, 6h)", value=[1, 2, 4, 6]),
             questionary.Choice("Short only (1h, 2h)",         value=[1, 2]),
             questionary.Choice("Quick test (2h, 6h)",         value=[2, 6]),
+            questionary.Choice("1h only",                     value=[1]),
+            questionary.Choice("2h only",                     value=[2]),
+            questionary.Choice("4h only",                     value=[4]),
+            questionary.Choice("6h only",                     value=[6]),
         ]
     ).ask()
     if dwell_choice is None:
