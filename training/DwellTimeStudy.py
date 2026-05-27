@@ -288,8 +288,9 @@ def run_single_triple(
 
     if result is not None:
         scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
-        logger.info(f"Done — reward={scalars.get('mean_reward', 'N/A'):.3f}"
-                    f"  wall={result['wall_time_s']:.1f}s")
+        reward = scalars.get('mean_reward')
+        reward_str = f"{reward:.3f}" if reward is not None else "N/A"
+        logger.info(f"Done — reward={reward_str}  wall={result['wall_time_s']:.1f}s")
     else:
         logger.error("Run failed — check study.log for details.")
 
