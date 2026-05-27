@@ -152,6 +152,7 @@ def _run_one_seed(
     seed_dir: str,
     dev_mode: bool,
     logger: logging.Logger,
+    show_progress: bool = False,
 ) -> dict:
     """Run one (method, dwell, seed) triple. Returns metric dict or None on failure."""
     set_global_seed(seed)
@@ -161,7 +162,7 @@ def _run_one_seed(
     try:
         metrics = run_single_experiment(
             verbose=False,
-            progress_enabled=False,
+            progress_enabled=show_progress,
             dev_mode=dev_mode,
             **kwargs,
         )
@@ -274,18 +275,16 @@ def run_single_triple(
                 f"  mode={'dev' if dev_mode else 'full'}")
     logger.info(f"Output -> {seed_dir}")
 
-    with tqdm(total=1, desc=f"{method_name} dwell={dwell_hours}h seed={seed}",
-              unit='run', ncols=80) as pbar:
-        result = _run_one_seed(
-            method=method,
-            dwell_hours=dwell_hours,
-            swift_min_stay=swift_min_stay,
-            seed=seed,
-            seed_dir=seed_dir,
-            dev_mode=dev_mode,
-            logger=logger,
-        )
-        pbar.update(1)
+    result = _run_one_seed(
+        method=method,
+        dwell_hours=dwell_hours,
+        swift_min_stay=swift_min_stay,
+        seed=seed,
+        seed_dir=seed_dir,
+        dev_mode=dev_mode,
+        logger=logger,
+        show_progress=True,
+    )
 
     if result is not None:
         scalars = {k: v for k, v in result.items() if not isinstance(v, list)}

@@ -307,8 +307,7 @@ def run_single_experiment(
     # ══════════════════════════════════════════════════════════════════
     desc = f"Train {combo_name}"
     
-    # We disable tqdm if either verbose is False or if progress_enabled is False
-    show_tqdm = verbose and progress_enabled
+    show_tqdm = progress_enabled
     for episode in tqdm(range(n_episodes), desc=desc, disable=not show_tqdm):
         total_reward = 0.0
         total_cost = 0.0
