@@ -26,6 +26,7 @@ from training.ComparisonPipeline import (
 )
 from training.MultiSeedRunner import run_multiseed_pipeline
 from training.DwellTimeStudy import run_dwell_time_study
+from training.LoRANetworkStudy import run_lora_network_study
 
 
 def run_Q_learning_simulation(dev_mode=False):
@@ -1484,6 +1485,78 @@ def run_dwell_study(dev_mode=False):
                          method_filter=method_filter, dev_mode=dev_mode)
 
 
+def run_lora_network_study_menu(dev_mode=False):
+    """LoRA Network Constraints Study — HFDRL vs HFDRL+LoRA across BW scenarios."""
+    from training.LoRANetworkStudy import run_single_pair, METHOD_BY_NAME
+    print("\n>>> LoRA Network Constraints Study")
+
+    run_mode = questionary.select(
+        "Run mode:",
+        choices=[
+            questionary.Choice("Full study  (both methods × seeds)", value='full'),
+            questionary.Choice("Group run   (select method subset)", value='group'),
+            questionary.Choice("Single pair (pick one method + seed)", value='single'),
+        ]
+    ).ask()
+    if run_mode is None:
+        sys.exit(0)
+
+    if run_mode == 'single':
+        method_choice = questionary.select(
+            "Method:",
+            choices=[
+                questionary.Choice("HFDRL (no LoRA)  — full model FL",    value='HFDRL (no LoRA)'),
+                questionary.Choice("HFDRL + LoRA     — LoRA-compressed FL", value='HFDRL + LoRA'),
+            ]
+        ).ask()
+        if method_choice is None:
+            sys.exit(0)
+
+        seed_choice = questionary.select(
+            "Seed:",
+            choices=[questionary.Choice(str(s), value=s)
+                     for s in [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]]
+        ).ask()
+        if seed_choice is None:
+            sys.exit(0)
+
+        print(f"\n>>> method={method_choice}  seed={seed_choice}"
+              f"  mode={'dev' if dev_mode else 'full'}")
+        run_single_pair(method_name=method_choice, seed=seed_choice, dev_mode=dev_mode)
+        return
+
+    if run_mode == 'group':
+        group_choice = questionary.select(
+            "Method group:",
+            choices=[
+                questionary.Choice("Both methods (full)", value=None),
+                questionary.Choice("HFDRL + LoRA only",   value='lora_only'),
+                questionary.Choice("HFDRL (no LoRA) only", value='nolora_only'),
+            ]
+        ).ask()
+        if group_choice is None and run_mode == 'group':
+            group_choice = 'full'
+    else:
+        group_choice = None   # full study
+
+    n_seeds_choice = questionary.select(
+        "Number of seeds:",
+        choices=[
+            questionary.Choice("5  seeds  (minimum)", value=5),
+            questionary.Choice("10 seeds  (AAAI preferred)", value=10),
+        ]
+    ).ask()
+    if n_seeds_choice is None:
+        sys.exit(0)
+
+    seed_sets = {5: [0, 1, 2, 3, 4], 10: [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]}
+    seeds = seed_sets[n_seeds_choice]
+
+    print(f"\n>>> Seeds: {seeds}  |  Group: {group_choice or 'full'}"
+          f"  |  Mode: {'dev' if dev_mode else 'full'}")
+    run_lora_network_study(seeds=seeds, method_filter=group_choice, dev_mode=dev_mode)
+
+
 def run_multiseed_evaluation(dev_mode=False):
     """Multi-seed statistical evaluation pipeline for AAAI publication."""
     print("\n>>> Multi-Seed Statistical Evaluation")
@@ -1590,6 +1663,7 @@ def main():
                     questionary.Choice("── Statistics ─────────────────────────", value=-2),
                     questionary.Choice("Multi-Seed Statistical Evaluation (AAAI)", value=16),
                     questionary.Choice("SWIFT Dwell-Time Study (AAAI)", value=17),
+                    questionary.Choice("LoRA Network Constraints Study (AAAI)", value=18),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1616,6 +1690,7 @@ def main():
                     questionary.Choice("── Statistics ─────────────────────────", value=-2),
                     questionary.Choice("Multi-Seed Statistical Evaluation (AAAI) (dev)", value=16),
                     questionary.Choice("SWIFT Dwell-Time Study (AAAI) (dev)", value=17),
+                    questionary.Choice("LoRA Network Constraints Study (AAAI) (dev)", value=18),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1660,6 +1735,8 @@ def main():
             run_multiseed_evaluation()
         elif args.simulation == 17:
             run_dwell_study()
+        elif args.simulation == 18:
+            run_lora_network_study_menu()
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
@@ -1703,6 +1780,8 @@ def main():
             run_multiseed_evaluation(dev_mode=True)
         elif args.simulation == 17:
             run_dwell_study(dev_mode=True)
+        elif args.simulation == 18:
+            run_lora_network_study_menu(dev_mode=True)
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)

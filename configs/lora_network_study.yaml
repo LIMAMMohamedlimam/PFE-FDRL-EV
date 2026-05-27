@@ -1,0 +1,104 @@
+# lora_network_study.yaml
+# ========================
+# Configuration for the LoRA Network Constraints Study (AAAI paper).
+#
+# Scientific objective
+# --------------------
+# Justify LoRA's existence by showing it becomes essential under realistic
+# low-bandwidth FL conditions.  Compares HFDRL (no LoRA) vs HFDRL + LoRA
+# across five bandwidth scenarios: 1 / 5 / 10 / 100 Mbps + variable.
+#
+# Study design — Two-phase approach
+# ----------------------------------
+#   Phase A : 2 methods × N seeds  (RL training via ComparisonPipeline)
+#             → reward quality, convergence, SoC, cost
+#   Phase B : Analytical comm overhead from measured model sizes
+#             → bytes / round, simulated transfer time per BW scenario
+#             Formula: time_s = (size_MB * 8 / bw_mbps) + (latency_ms / 1000)
+#
+# NOTE: Bandwidth scenarios affect only the analytical communication
+#       model (Phase B). RL training quality is bandwidth-independent.
+
+# ── Methods ──────────────────────────────────────────────────────────────────
+methods:
+  - name: "HFDRL (no LoRA)"
+    policy: sac
+    aggregation: fedavg
+    use_swift: true
+    use_lora: false
+
+  - name: "HFDRL + LoRA"
+    policy: sac
+    aggregation: fedavg
+    use_swift: true
+    use_lora: true
+
+# ── Bandwidth scenarios (Phase B analytical only) ────────────────────────────
+#   agent_bw  : uplink bandwidth in Mbps  (use "variable" for stochastic)
+#   agent_lat : one-way latency in ms
+#   bw_range  : [min, mid, max] Mbps used when agent_bw == "variable"
+bandwidth_scenarios:
+  - name: "1_Mbps"
+    agent_bw: 1
+    agent_lat: 100
+    label: "1 Mbps"
+
+  - name: "5_Mbps"
+    agent_bw: 5
+    agent_lat: 50
+    label: "5 Mbps"
+
+  - name: "10_Mbps"
+    agent_bw: 10
+    agent_lat: 20
+    label: "10 Mbps"
+
+  - name: "100_Mbps"
+    agent_bw: 100
+    agent_lat: 5
+    label: "100 Mbps"
+
+  - name: "variable"
+    agent_bw: "variable"
+    bw_range: [1, 5, 10]
+    agent_lat: 50
+    label: "Variable"
+
+# ── Network topology used for multi-agent comm overhead computation ───────────
+n_agents: 20          # number of FL participants per round
+
+# ── Named run groups (pass to --group flag or select interactively) ───────────
+#   Allows running one method subset at a time and merging results later.
+run_groups:
+  lora_only:   ["HFDRL + LoRA"]
+  nolora_only: ["HFDRL (no LoRA)"]
+  full:        ["HFDRL (no LoRA)", "HFDRL + LoRA"]
+
+# ── Statistical robustness ────────────────────────────────────────────────────
+seeds: [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]
+ci_z: 1.96
+alpha: 0.05           # significance level for paired t-test
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_base: "results/lora_network_study"
+
+# ── Convergence detection (same as multiseed.yaml) ───────────────────────────
+convergence_window: 10
+convergence_threshold: 0.90
+smooth_window: 10
+
+# ── AAAI plot formatting (mirrors dwell_time_study.yaml) ─────────────────────
+plot:
+  dpi: 300
+  font_family: "serif"
+  font_size: 9
+  title_size: 10
+  legend_size: 8
+  label_size: 9
+  line_width: 1.5
+  ci_alpha: 0.18
+  figsize_single: [3.33, 2.6]
+  figsize_double: [7.0, 2.6]
+  figsize_wide:   [7.0, 4.2]
+  figsize_quad:   [7.0, 5.6]
+  bar_width: 0.35
