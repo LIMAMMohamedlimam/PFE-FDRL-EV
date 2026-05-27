@@ -155,6 +155,8 @@ def run_single_experiment(
     adam_lr=0.01,             # FedAdam server learning rate
     dwell_time_hours=None,    # Dwell-time study: fix all agents' t_dep + sim_hours to this value
     swift_min_stay_override=None,  # Dwell-time study: override swift.yaml min_stay_hours
+    tqdm_position=None,       # tqdm position for nested bars (None = auto)
+    tqdm_leave=True,          # tqdm leave for nested bars
     **extra_cfg,
 ):
     print("Running single experiment... {policy} {aggregation}")
@@ -308,7 +310,8 @@ def run_single_experiment(
     desc = f"Train {combo_name}"
     
     show_tqdm = progress_enabled
-    for episode in tqdm(range(n_episodes), desc=desc, disable=not show_tqdm):
+    for episode in tqdm(range(n_episodes), desc=desc, disable=not show_tqdm,
+                        position=tqdm_position, leave=tqdm_leave, ncols=90):
         total_reward = 0.0
         total_cost = 0.0
         grid.reset()

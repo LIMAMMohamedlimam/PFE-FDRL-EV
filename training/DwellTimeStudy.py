@@ -153,6 +153,8 @@ def _run_one_seed(
     dev_mode: bool,
     logger: logging.Logger,
     show_progress: bool = False,
+    tqdm_position: int = None,
+    tqdm_leave: bool = False,
 ) -> dict:
     """Run one (method, dwell, seed) triple. Returns metric dict or None on failure."""
     set_global_seed(seed)
@@ -164,6 +166,8 @@ def _run_one_seed(
             verbose=False,
             progress_enabled=show_progress,
             dev_mode=dev_mode,
+            tqdm_position=tqdm_position,
+            tqdm_leave=tqdm_leave,
             **kwargs,
         )
     except Exception as exc:
@@ -404,6 +408,9 @@ def run_dwell_time_study(
                     seed_dir=seed_dir,
                     dev_mode=dev_mode,
                     logger=logger,
+                    show_progress=True,
+                    tqdm_position=4,
+                    tqdm_leave=False,
                 )
 
                 status = 'ok' if result is not None else 'failed'
