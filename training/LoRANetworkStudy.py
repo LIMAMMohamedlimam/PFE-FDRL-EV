@@ -231,11 +231,13 @@ def _run_one_seed(
     )
 
     t0 = time.time()
+    logger.info(f"  ▶ {method['name']}  seed={seed}  starting …")
     try:
-        print(f"  Running {method['name']} seed={seed}...")
         metrics = run_single_experiment(
-            verbose=False,
-            progress_enabled=show_progress,
+            verbose=True,
+            progress_enabled=True,
+            tqdm_position=3,
+            tqdm_leave=False,
             dev_mode=dev_mode,
             **kwargs,
         )
