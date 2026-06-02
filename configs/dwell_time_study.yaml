@@ -43,6 +43,7 @@ swift_min_stay:
   2: 0.5    # 2h dwell → agents with < 30 min remaining filtered out
   4: 1.0    # 4h dwell → agents with < 1h remaining filtered out
   6: 1.5    # 6h dwell → agents with < 1.5h remaining filtered out
+  8: 2.0    # 8h dwell → agents with < 2h remaining filtered out
 
 # ── Output ────────────────────────────────────────────────────────────────────
 output_base: "results/dwell_time_study"

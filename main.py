@@ -27,6 +27,7 @@ from training.ComparisonPipeline import (
 from training.MultiSeedRunner import run_multiseed_pipeline
 from training.DwellTimeStudy import run_dwell_time_study
 from training.LoRANetworkStudy import run_lora_network_study
+from training.StressTestStudy import run_stress_test_study, run_single_stress_run
 
 
 def run_Q_learning_simulation(dev_mode=False):
@@ -1384,7 +1385,7 @@ def run_sac_centralized_simulation(dev_mode=False):
 
 
 def run_dwell_study(dev_mode=False):
-    """SWIFT dwell-time analysis — FedAvg vs SWIFT vs HFDRL across 1h/2h/4h/6h windows."""
+    """SWIFT dwell-time analysis — FedAvg vs SWIFT vs HFDRL across 1h/2h/4h/6h/8h windows."""
     from training.DwellTimeStudy import run_single_triple
     print("\n>>> SWIFT Dwell-Time Study")
 
@@ -1416,7 +1417,8 @@ def run_dwell_study(dev_mode=False):
                 questionary.Choice("1h  (very short window)", value=1),
                 questionary.Choice("2h",                      value=2),
                 questionary.Choice("4h",                      value=4),
-                questionary.Choice("6h  (long window)",       value=6),
+                questionary.Choice("6h",                      value=6),
+                questionary.Choice("8h  (long window)",       value=8),
             ]
         ).ask()
         if dwell_choice is None:
@@ -1460,13 +1462,14 @@ def run_dwell_study(dev_mode=False):
     dwell_choice = questionary.select(
         "Dwell-time scenarios to run:",
         choices=[
-            questionary.Choice("All four  (1h, 2h, 4h, 6h)", value=[1, 2, 4, 6]),
-            questionary.Choice("Short only (1h, 2h)",         value=[1, 2]),
-            questionary.Choice("Quick test (2h, 6h)",         value=[2, 6]),
-            questionary.Choice("1h only",                     value=[1]),
-            questionary.Choice("2h only",                     value=[2]),
-            questionary.Choice("4h only",                     value=[4]),
-            questionary.Choice("6h only",                     value=[6]),
+            questionary.Choice("All five  (1h, 2h, 4h, 6h, 8h)", value=[1, 2, 4, 6, 8]),
+            questionary.Choice("Short only (1h, 2h)",              value=[1, 2]),
+            questionary.Choice("Quick test (2h, 6h)",              value=[2, 6]),
+            questionary.Choice("1h only",                          value=[1]),
+            questionary.Choice("2h only",                          value=[2]),
+            questionary.Choice("4h only",                          value=[4]),
+            questionary.Choice("6h only",                          value=[6]),
+            questionary.Choice("8h only",                          value=[8]),
         ]
     ).ask()
     if dwell_choice is None:
@@ -1601,6 +1604,154 @@ def run_multiseed_evaluation(dev_mode=False):
     run_multiseed_pipeline(seeds=seeds, dev_mode=dev_mode, method_filter=method_filter)
 
 
+def run_stress_test_menu(dev_mode=False):
+    """Robustness stress-test study — Forecast Error & Non-IID Data (AAAI)."""
+    print("\n>>> Robustness Stress Test Study")
+
+    sub_choice = questionary.select(
+        "Sub-study to run:",
+        choices=[
+            questionary.Choice("Both  (Forecast Error + Non-IID)",  value='both'),
+            questionary.Choice("Forecast Error only",               value='forecast_error'),
+            questionary.Choice("Non-IID Data only",                 value='non_iid'),
+            questionary.Choice("Single run  (pick one combination)", value='single'),
+        ]
+    ).ask()
+    if sub_choice is None:
+        sys.exit(0)
+
+    # ── Single-run path ────────────────────────────────────────────────────────
+    if sub_choice == 'single':
+        sub_single = questionary.select(
+            "Sub-study for single run:",
+            choices=[
+                questionary.Choice("Forecast Error", value='forecast_error'),
+                questionary.Choice("Non-IID Data",   value='non_iid'),
+            ]
+        ).ask()
+        if sub_single is None:
+            sys.exit(0)
+
+        if sub_single == 'forecast_error':
+            scenario_choice = questionary.select(
+                "Noise level σ ($/kWh):",
+                choices=[
+                    questionary.Choice("0.00  (no noise — baseline)",          value=0.0),
+                    questionary.Choice("0.02  (~10% relative noise — mild)",    value=0.02),
+                    questionary.Choice("0.05  (~25% relative noise — moderate)", value=0.05),
+                    questionary.Choice("0.10  (~50% relative noise — severe)",  value=0.10),
+                    questionary.Choice("0.20  (~100% relative noise — extreme)", value=0.20),
+                ]
+            ).ask()
+        else:
+            scenario_choice = questionary.select(
+                "Dirichlet α (data heterogeneity):",
+                choices=[
+                    questionary.Choice("1000  (≈ IID — homogeneous)",           value=1000.0),
+                    questionary.Choice("10    (mild heterogeneity)",             value=10.0),
+                    questionary.Choice("1.0   (moderate heterogeneity)",         value=1.0),
+                    questionary.Choice("0.5   (high heterogeneity)",             value=0.5),
+                    questionary.Choice("0.1   (extreme heterogeneity)",          value=0.1),
+                ]
+            ).ask()
+        if scenario_choice is None:
+            sys.exit(0)
+
+        method_choice = questionary.select(
+            "Method:",
+            choices=[
+                questionary.Choice("FedAvg-SAC  (baseline federated)", value='FedAvg-SAC'),
+                questionary.Choice("SWIFT-SAC   (smart selection)",     value='SWIFT-SAC'),
+                questionary.Choice("HFDRL       (SWIFT + LoRA)",        value='HFDRL'),
+            ]
+        ).ask()
+        if method_choice is None:
+            sys.exit(0)
+
+        archetype_choice = 'nhts'
+        if sub_single == 'non_iid':
+            archetype_choice = questionary.select(
+                "Driver archetype table:",
+                choices=[
+                    questionary.Choice("NHTS 2017  (default, Bureau of Transportation Statistics)",
+                                       value='nhts'),
+                    questionary.Choice("ACN-Data   (Lee et al., 2019, Caltech)",
+                                       value='acn'),
+                ]
+            ).ask()
+            if archetype_choice is None:
+                sys.exit(0)
+
+        seed_choice = questionary.select(
+            "Seed:",
+            choices=[questionary.Choice(str(s), value=s) for s in [0, 1, 2, 42, 123]]
+        ).ask()
+        if seed_choice is None:
+            sys.exit(0)
+
+        print(f"\n>>> sub={sub_single}  scenario={scenario_choice}  "
+              f"method={method_choice}  seed={seed_choice}  "
+              f"archetype={archetype_choice}  mode={'dev' if dev_mode else 'full'}")
+        run_single_stress_run(
+            sub_study=sub_single,
+            scenario_value=scenario_choice,
+            method_name=method_choice,
+            seed=seed_choice,
+            dev_mode=dev_mode,
+            archetype_set=archetype_choice,
+        )
+        return
+
+    # ── Full / sub-study path ─────────────────────────────────────────────────
+    archetype_choice = 'nhts'
+    if sub_choice in ('non_iid', 'both'):
+        archetype_choice = questionary.select(
+            "Driver archetype table for Non-IID sub-study:",
+            choices=[
+                questionary.Choice("NHTS 2017  (default, Bureau of Transportation Statistics)",
+                                   value='nhts'),
+                questionary.Choice("ACN-Data   (Lee et al., 2019, Caltech)",
+                                   value='acn'),
+            ]
+        ).ask()
+        if archetype_choice is None:
+            sys.exit(0)
+
+    n_seeds_choice = questionary.select(
+        "Number of seeds:",
+        choices=[
+            questionary.Choice("5  seeds  (recommended for ablations)", value=5),
+            questionary.Choice("10 seeds  (full AAAI rigor)",           value=10),
+        ]
+    ).ask()
+    if n_seeds_choice is None:
+        sys.exit(0)
+
+    seed_sets = {5: [0, 1, 2, 42, 123], 10: [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]}
+    seeds = seed_sets[n_seeds_choice]
+
+    method_filter = questionary.checkbox(
+        "Limit to specific methods? (space to toggle, enter to confirm all):",
+        choices=[
+            questionary.Choice("FedAvg-SAC", value='FedAvg-SAC', checked=True),
+            questionary.Choice("SWIFT-SAC",  value='SWIFT-SAC',  checked=True),
+            questionary.Choice("HFDRL",      value='HFDRL',      checked=True),
+        ]
+    ).ask()
+    if not method_filter:
+        sys.exit(0)
+
+    print(f"\n>>> Sub-study: {sub_choice}  |  Seeds: {seeds}  |  Methods: {method_filter}"
+          f"  |  Archetypes: {archetype_choice}  |  Mode: {'dev' if dev_mode else 'full'}")
+    run_stress_test_study(
+        sub_study=sub_choice,
+        seeds=seeds,
+        method_filter=method_filter,
+        dev_mode=dev_mode,
+        archetype_set=archetype_choice,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="FDRL EV Charging Simulation")
     parser.add_argument(
@@ -1668,6 +1819,7 @@ def main():
                     questionary.Choice("Multi-Seed Statistical Evaluation (AAAI)", value=16),
                     questionary.Choice("SWIFT Dwell-Time Study (AAAI)", value=17),
                     questionary.Choice("LoRA Network Constraints Study (AAAI)", value=18),
+                    questionary.Choice("Robustness Stress Tests — Forecast Error + Non-IID (AAAI)", value=19),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1695,6 +1847,7 @@ def main():
                     questionary.Choice("Multi-Seed Statistical Evaluation (AAAI) (dev)", value=16),
                     questionary.Choice("SWIFT Dwell-Time Study (AAAI) (dev)", value=17),
                     questionary.Choice("LoRA Network Constraints Study (AAAI) (dev)", value=18),
+                    questionary.Choice("Robustness Stress Tests — Forecast Error + Non-IID (dev)", value=19),
                 ],
                 use_arrow_keys=True
             ).ask()
@@ -1741,6 +1894,8 @@ def main():
             run_dwell_study()
         elif args.simulation == 18:
             run_lora_network_study_menu()
+        elif args.simulation == 19:
+            run_stress_test_menu()
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
@@ -1786,6 +1941,8 @@ def main():
             run_dwell_study(dev_mode=True)
         elif args.simulation == 18:
             run_lora_network_study_menu(dev_mode=True)
+        elif args.simulation == 19:
+            run_stress_test_menu(dev_mode=True)
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)

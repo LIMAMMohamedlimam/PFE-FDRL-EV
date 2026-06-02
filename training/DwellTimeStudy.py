@@ -262,7 +262,7 @@ def run_single_triple(
         output_base = cfg.get('output_base', 'results/dwell_time_study')
 
     swift_min_stay_map = {int(k): float(v) for k, v in
-                          cfg.get('swift_min_stay', {1: 0.0, 2: 0.5, 4: 1.0, 6: 1.5}).items()}
+                          cfg.get('swift_min_stay', {1: 0.0, 2: 0.5, 4: 1.0, 6: 1.5, 8: 2.0}).items()}
     swift_min_stay = swift_min_stay_map.get(dwell_hours, 0.0)
 
     method = METHOD_BY_NAME[method_name]
@@ -334,12 +334,12 @@ def run_dwell_time_study(
     if seeds is None:
         seeds = cfg.get('seeds', [0, 1, 2, 3, 4])
     if dwell_hours_list is None:
-        dwell_hours_list = cfg.get('dwell_hours', [1, 2, 4, 6])
+        dwell_hours_list = cfg.get('dwell_hours', [1, 2, 4, 6, 8])
     if output_base is None:
         output_base = cfg.get('output_base', 'results/dwell_time_study')
 
     swift_min_stay_map = {int(k): float(v) for k, v in
-                          cfg.get('swift_min_stay', {1: 0.0, 2: 0.5, 4: 1.0, 6: 1.5}).items()}
+                          cfg.get('swift_min_stay', {1: 0.0, 2: 0.5, 4: 1.0, 6: 1.5, 8: 2.0}).items()}
 
     methods = [m for m in STUDY_METHODS
                if method_filter is None or m['name'] in method_filter]

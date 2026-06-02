@@ -41,14 +41,30 @@ from utils.config_loader import get_config
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
 
-def _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power, fixed_dwell_hours=None):
+def _make_envs_and_profiles(
+    n_agents,
+    ev_capacity,
+    ev_max_power,
+    fixed_dwell_hours=None,
+    non_iid_alpha=None,
+    n_edges=2,
+    archetype_set='nhts',
+):
     """Create EV environments and matching driver profiles.
 
     Args:
-        fixed_dwell_hours: When set, overrides every agent's t_dep with this
-                           value (used by the dwell-time study).
+        fixed_dwell_hours: When set, overrides every agent's t_dep (dwell-time study).
+        non_iid_alpha    : When set, use Dirichlet non-IID profiles instead of
+                           the default IID NHTS Gaussian. Lower alpha = more heterogeneous.
+        n_edges          : Number of FL edges for Dirichlet allocation.
+        archetype_set    : 'nhts' (default) or 'acn' — driver archetype table to use.
     """
-    profiles = DataGenerator.get_nhts_profile(n_agents)
+    if non_iid_alpha is not None:
+        profiles = DataGenerator.get_nhts_profile_noniid(
+            n_agents, alpha=non_iid_alpha, n_edges=n_edges, archetype_set=archetype_set
+        )
+    else:
+        profiles = DataGenerator.get_nhts_profile(n_agents)
     envs = []
     for i in range(n_agents):
         t_dep = int(fixed_dwell_hours) if fixed_dwell_hours is not None else profiles[i]['duration']
@@ -153,10 +169,13 @@ def run_single_experiment(
     mu_fedprox=0.01,          # FedProx proximal coefficient
     beta_momentum=0.9,        # FedAvgM momentum coefficient
     adam_lr=0.01,             # FedAdam server learning rate
-    dwell_time_hours=None,    # Dwell-time study: fix all agents' t_dep + sim_hours to this value
+    dwell_time_hours=None,         # Dwell-time study: fix all agents' t_dep + sim_hours
     swift_min_stay_override=None,  # Dwell-time study: override swift.yaml min_stay_hours
-    tqdm_position=None,       # tqdm position for nested bars (None = auto)
-    tqdm_leave=True,          # tqdm leave for nested bars
+    forecast_noise_std=0.0,        # Stress test: Gaussian σ on 5-hour price forecast ($/kWh)
+    non_iid_alpha=None,            # Stress test: Dirichlet α for driver-type distribution
+    archetype_set='nhts',          # Non-IID archetype table: 'nhts' (default) or 'acn'
+    tqdm_position=None,            # tqdm position for nested bars (None = auto)
+    tqdm_leave=True,               # tqdm leave for nested bars
     **extra_cfg,
 ):
     print("Running single experiment... {policy} {aggregation}")
@@ -224,8 +243,13 @@ def run_single_experiment(
 
     metrics = EvalMetrics(run_name=run_name, config=sim_config)
     grid = GridEnv(network_type=grid_type)
-    envs, profiles = _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power,
-                                              fixed_dwell_hours=dwell_time_hours)
+    envs, profiles = _make_envs_and_profiles(
+        n_agents, ev_capacity, ev_max_power,
+        fixed_dwell_hours=dwell_time_hours,
+        non_iid_alpha=non_iid_alpha,
+        n_edges=n_edges,
+        archetype_set=archetype_set,
+    )
     agent_bus_map = {i: (i % 30) + 2 for i in range(n_agents)}
 
     # Input dimension probe
@@ -331,6 +355,9 @@ def run_single_experiment(
         for hour in range(sim_hours):
             price = DataGenerator.get_iso_ne_price(hour, mode='train')
             price_forecast = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='train') for h in range(5)]
+            if forecast_noise_std > 0.0:
+                price_forecast = [max(0.0, p + float(np.random.normal(0.0, forecast_noise_std)))
+                                  for p in price_forecast]
             base_load_mw = np.random.normal(3.5, 0.2)
 
             # -- aggregate target (for stability penalty) --
@@ -508,6 +535,9 @@ def run_single_experiment(
         for hour in range(sim_hours):
             price = DataGenerator.get_iso_ne_price(hour, mode='test')
             pf = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='test') for h in range(5)]
+            if forecast_noise_std > 0.0:
+                pf = [max(0.0, p + float(np.random.normal(0.0, forecast_noise_std)))
+                      for p in pf]
             base_load = np.random.normal(3.8, 0.3)
 
             grid_inj = {}
