@@ -654,6 +654,9 @@ def run_lora_network_study(
     # ── Post-processing: plots + tables ──────────────────────────────────────
     if not no_plots:
         try:
+            _proj_root = str(Path(__file__).resolve().parent.parent)
+            if _proj_root not in sys.path:
+                sys.path.insert(0, _proj_root)
             from scripts.generate_lora_network_plots import generate_all_lora_network_plots
             logger.info('\n── Post-processing (plots + tables) ──')
             generate_all_lora_network_plots(all_results, combined_comm, agg_dir, cfg)
