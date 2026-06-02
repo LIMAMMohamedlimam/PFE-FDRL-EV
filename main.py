@@ -1533,13 +1533,13 @@ def run_lora_network_study_menu(dev_mode=False):
         group_choice = questionary.select(
             "Method group:",
             choices=[
-                questionary.Choice("Both methods (full)", value=None),
+                questionary.Choice("Both methods (full)", value='full'),
                 questionary.Choice("HFDRL + LoRA only",   value='lora_only'),
                 questionary.Choice("HFDRL (no LoRA) only", value='nolora_only'),
             ]
         ).ask()
-        if group_choice is None and run_mode == 'group':
-            group_choice = 'full'
+        if group_choice is None:
+            sys.exit(0)
     else:
         group_choice = None   # full study
 

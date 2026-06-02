@@ -50,6 +50,7 @@ import math
 import logging
 import argparse
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -136,13 +137,19 @@ def _setup_logger(output_dir: str) -> logging.Logger:
 def _load_study_cfg() -> dict:
     try:
         return get_config('lora_network_study')
-    except Exception:
+    except Exception as exc:
+        logging.getLogger('lora_network_study').warning(
+            f"Could not load lora_network_study config: {exc} — using built-in defaults"
+        )
         return {}
 
 
 def _resolve_method_group(method_filter, cfg: dict) -> list:
     """Resolve method list from filter string, group key, or None (→ full)."""
     if method_filter is None:
+        return list(STUDY_METHODS)
+    # Built-in aliases — config-independent, always mean "all methods"
+    if isinstance(method_filter, str) and method_filter.lower() in ('full', 'all'):
         return list(STUDY_METHODS)
 
     run_groups = cfg.get('run_groups', {})
@@ -225,6 +232,7 @@ def _run_one_seed(
 
     t0 = time.time()
     try:
+        print(f"  Running {method['name']} seed={seed}...")
         metrics = run_single_experiment(
             verbose=False,
             progress_enabled=show_progress,
