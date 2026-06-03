@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import os
 import torch.optim as optim
 from torch.distributions import Normal
 from agents.BaseAgent import BaseAgent
@@ -158,7 +159,9 @@ class PPOAgent(BaseAgent):
         """
         Returns a continuous action value in range [-1, 1].
         """
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        state_tensor = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0)
+        if self.device.type != 'cpu':
+            state_tensor = state_tensor.to(self.device)
 
         if eval_mode:
             with torch.no_grad():
@@ -178,8 +181,8 @@ class PPOAgent(BaseAgent):
         """
         Standard PPO buffer storage. Tensors stored on device.
         """
-        self.buffer_states.append(torch.FloatTensor(state).to(self.device))
-        self.buffer_actions.append(torch.FloatTensor([action]).to(self.device))
+        self.buffer_states.append(torch.as_tensor(state, dtype=torch.float32))
+        self.buffer_actions.append(torch.as_tensor([action], dtype=torch.float32))
         self.buffer_logprobs.append(self.current_log_prob)
         self.buffer_rewards.append(reward)
         self.buffer_is_terminals.append(done)
@@ -229,7 +232,7 @@ class PPOAgent(BaseAgent):
 
             loss = -torch.min(surr1, surr2) + 0.5 * nn.MSELoss()(state_values, rewards) - 0.01 * dist_entropy
             
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             loss.mean().backward()
             # Gradient Clipping
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
@@ -267,3 +270,23 @@ class PPOAgent(BaseAgent):
             new_state_dict = {k: torch.from_numpy(v).to(self.device) for k, v in parameters.items()}
             self.policy.load_state_dict(new_state_dict)
             self.policy_old.load_state_dict(new_state_dict)
+
+    def save_trained_model(self, directory, agent_id):
+        if self.use_lora:
+            filename = os.path.join(directory, f"ppo_agent_lora_{agent_id}.pth")
+            torch.save(self.state_dict(), filename)
+            print(f"Saved LoRA adapters for agent {agent_id} to {filename}")
+        else:
+            filename = os.path.join(directory, f"ppo_agent_{agent_id}.pth")
+            torch.save(self.state_dict(), filename)
+            print(f"Saved full model for agent {agent_id} to {filename}")
+
+    def load_trained_model(self, directory, agent_id):
+        if self.use_lora:
+            filename = os.path.join(directory, f"ppo_agent_lora_{agent_id}.pth")
+            self.load_state_dict(torch.load(filename))
+            print(f"Loaded LoRA adapters for agent {agent_id} from {filename}")
+        else:
+            filename = os.path.join(directory, f"ppo_agent_{agent_id}.pth")
+            self.load_state_dict(torch.load(filename))
+            print(f"Loaded full model for agent {agent_id} from {filename}")

@@ -90,3 +90,69 @@ class DataGenerator:
                 'soc_req': np.random.uniform(0.8, 1.0)   # Veut repartir plein
             })
         return profiles
+
+    # ── Non-IID archetype tables ──────────────────────────────────────────────
+    # Each row: (t_arr_mu, t_arr_sig, t_dep_mu, t_dep_sig, soc_init_lo, soc_req_lo, label)
+
+    # NHTS 2017 calibrated (default) — Bureau of Transportation Statistics
+    _NHTS_ARCHETYPES = [
+        (17, 1,   8, 0.5, 0.10, 0.90, 'commuter'),     # evening plug-in, early departure
+        (19, 3,   9, 2.0, 0.20, 0.70, 'flexible'),      # variable schedule, lower SOC target
+        (22, 1,   6, 1.0, 0.10, 0.80, 'night_charger'), # late plug-in, early morning departure
+    ]
+
+    # ACN-Data calibrated — Lee et al., 2019, Caltech Adaptive Charging Network
+    _ACN_ARCHETYPES = [
+        ( 9, 1.5, 17, 1.0, 0.30, 0.85, 'work_day'),   # morning arrival, afternoon departure
+        (18, 1.5, 23, 1.5, 0.20, 0.80, 'evening'),     # evening arrival, late-night departure
+        (22, 1.0,  7, 1.0, 0.10, 0.85, 'overnight'),   # night plug-in, morning departure
+    ]
+
+    _ARCHETYPE_SETS = {
+        'nhts': _NHTS_ARCHETYPES,
+        'acn':  _ACN_ARCHETYPES,
+    }
+
+    @staticmethod
+    def get_nhts_profile_noniid(
+        n_drivers: int,
+        alpha: float,
+        n_edges: int = 2,
+        archetype_set: str = 'nhts',
+    ) -> list:
+        """
+        Non-IID driver profiles via Dirichlet allocation of 3 archetypes per edge.
+
+        Each FL edge gets its own type-proportion vector sampled from
+        Dirichlet([alpha]*3). Lower alpha → stronger inter-edge heterogeneity.
+        alpha=1000 ≈ IID (all edges see the same balanced mix).
+
+        Parameters
+        ----------
+        n_drivers     : Total number of agent profiles to generate.
+        alpha         : Dirichlet concentration. Lower = more non-IID.
+        n_edges       : Number of FL edges (heterogeneity groups).
+        archetype_set : 'nhts' (default, NHTS-2017) or 'acn' (Lee et al., 2019).
+        """
+        archetypes = DataGenerator._ARCHETYPE_SETS.get(archetype_set,
+                                                        DataGenerator._NHTS_ARCHETYPES)
+        n_types = len(archetypes)
+        agents_per_edge = np.array_split(range(n_drivers), n_edges)
+        profiles = [None] * n_drivers
+        for edge_agents in agents_per_edge:
+            props = np.random.dirichlet([alpha] * n_types)
+            for idx in edge_agents:
+                chosen = int(np.random.choice(n_types, p=props))
+                a = archetypes[chosen]
+                t_arr = int(np.clip(np.random.normal(a[0], a[1]), 0, 23))
+                t_dep = int(np.clip(np.random.normal(a[2], a[3]), 0, 23))
+                stay  = (24 - t_arr + t_dep) if t_dep < t_arr else (t_dep - t_arr)
+                profiles[idx] = {
+                    't_start':    t_arr,
+                    't_dep':      t_dep,
+                    'duration':   stay,
+                    'soc_init':   float(np.random.uniform(a[4], a[4] + 0.2)),
+                    'soc_req':    float(np.random.uniform(a[5], min(a[5] + 0.15, 1.0))),
+                    '_archetype': a[6],
+                }
+        return profiles

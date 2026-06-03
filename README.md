@@ -210,7 +210,7 @@ See [REWARD_DESIGN.md](REWARD_DESIGN.md) for full mathematical formulation.
 - [x] **Comparison Pipeline** — All 9 combos with comparative plots
 - [x] **Real Price Data** — `MarketPriceLoader` loads real ISO-NE style CSV prices (toggle via `use_real_prices`)
 - [ ] **LoRA Integration** — Freeze base weights, train only low-rank A/B matrices
-- [ ] **SWIFT Scheduling** — Client selection under time-of-stay constraints
+- [x] **SWIFT Scheduling** — Client selection under time-of-stay constraints (modes 9/10)
 - [ ] **DQN Agent** — Deep Q-Network as alternative to tabular Q-Learning
 - [ ] **Real Driver Profiles** — Replace synthetic NHTS profile generator with real NHTS survey data
 

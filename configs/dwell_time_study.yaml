@@ -1,0 +1,69 @@
+# dwell_time_study.yaml
+# Configuration for the SWIFT dwell-time analysis (AAAI paper Section: Dwell-Time Study)
+#
+# Scientific objective:
+#   Demonstrate that SWIFT better exploits short participation windows and
+#   intermittent agent availability compared to classical federated aggregation.
+
+# ── Dwell-time scenarios ──────────────────────────────────────────────────────
+dwell_hours: [1, 2, 4, 6]      # EV stationing durations to sweep (hours)
+
+# ── Methods under study ───────────────────────────────────────────────────────
+# Each entry maps to run_single_experiment kwargs.
+methods:
+  - name: "FedAvg-SAC"
+    policy: sac
+    aggregation: fedavg
+    use_swift: false
+    use_lora: false
+
+  - name: "SWIFT-SAC"
+    policy: sac
+    aggregation: fedavg
+    use_swift: true
+    use_lora: false
+
+  - name: "HFDRL"
+    policy: sac
+    aggregation: fedavg
+    use_swift: true
+    use_lora: true
+
+# ── Statistical robustness ────────────────────────────────────────────────────
+seeds: [0, 1, 2, 3, 4, 42, 123, 456, 789, 999]   # 10 seeds (AAAI minimum 5)
+ci_z: 1.96           # z-score for 95% CI
+alpha: 0.05          # significance level
+
+# ── SWIFT per-scenario min_stay_hours ─────────────────────────────────────────
+# Set to 25% of dwell time so the eligibility filter is non-trivial.
+# SWIFT's utility scoring (staleness, SOC gap, diversity) is the primary
+# differentiator; the eligibility filter provides a secondary quality gate.
+swift_min_stay:
+  1: 0.0    # 1h dwell → no time filter (all eligible, utility scoring only)
+  2: 0.5    # 2h dwell → agents with < 30 min remaining filtered out
+  4: 1.0    # 4h dwell → agents with < 1h remaining filtered out
+  6: 1.5    # 6h dwell → agents with < 1.5h remaining filtered out
+  8: 2.0    # 8h dwell → agents with < 2h remaining filtered out
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_base: "results/dwell_time_study"
+
+# ── Convergence detection (mirrors multiseed.yaml) ────────────────────────────
+convergence_window: 10
+convergence_threshold: 0.90
+smooth_window: 10
+
+# ── AAAI plot formatting (mirrors multiseed.yaml) ─────────────────────────────
+plot:
+  dpi: 300
+  font_family: "serif"
+  font_size: 9
+  title_size: 10
+  legend_size: 8
+  label_size: 9
+  line_width: 1.5
+  ci_alpha: 0.18
+  figsize_single: [3.33, 2.6]
+  figsize_double: [7.0, 2.6]
+  figsize_wide:   [7.0, 4.2]
+  figsize_quad:   [7.0, 5.6]   # 2×2 grid (4 dwell-time panels)

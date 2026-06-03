@@ -6,6 +6,7 @@ Unified runner that trains every combination of
 and produces comparative plots.
 """
 
+import time
 import numpy as np
 import torch
 import matplotlib
@@ -15,6 +16,7 @@ from datetime import datetime
 from tqdm import tqdm
 import os
 import multiprocessing as mp
+from utils.functions import ts
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Project modules
@@ -25,6 +27,10 @@ from utils.DataLoader import DataGenerator
 from agents.QLearningAgent import QLearningAgent
 from agents.PPOAgent import PPOAgent
 from agents.SACAgent import SACAgent
+from agents.HeuristicAgents import (
+    RandomAgent, GreedyAgent, EarliestDeadlineFirst,
+    PriceAwareAgent, SimpleMPCAgent,
+)
 from training.FederatedServer import FederatedServer
 from training.EdgeAggregator import EdgeAggregator
 from utils.device_utils import device_info
@@ -35,29 +41,62 @@ from utils.config_loader import get_config
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
 
-def _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power):
-    """Create EV environments and matching driver profiles."""
-    profiles = DataGenerator.get_nhts_profile(n_agents)
+def _make_envs_and_profiles(
+    n_agents,
+    ev_capacity,
+    ev_max_power,
+    fixed_dwell_hours=None,
+    non_iid_alpha=None,
+    n_edges=2,
+    archetype_set='nhts',
+):
+    """Create EV environments and matching driver profiles.
+
+    Args:
+        fixed_dwell_hours: When set, overrides every agent's t_dep (dwell-time study).
+        non_iid_alpha    : When set, use Dirichlet non-IID profiles instead of
+                           the default IID NHTS Gaussian. Lower alpha = more heterogeneous.
+        n_edges          : Number of FL edges for Dirichlet allocation.
+        archetype_set    : 'nhts' (default) or 'acn' — driver archetype table to use.
+    """
+    if non_iid_alpha is not None:
+        profiles = DataGenerator.get_nhts_profile_noniid(
+            n_agents, alpha=non_iid_alpha, n_edges=n_edges, archetype_set=archetype_set
+        )
+    else:
+        profiles = DataGenerator.get_nhts_profile(n_agents)
     envs = []
     for i in range(n_agents):
+        t_dep = int(fixed_dwell_hours) if fixed_dwell_hours is not None else profiles[i]['duration']
+        if fixed_dwell_hours is not None:
+            profiles[i]['duration'] = t_dep  # keep profile consistent for SWIFT
         cfg = {
             'capacity': ev_capacity,
             'max_power': ev_max_power,
             'initial_soc': profiles[i]['soc_init'],
             'soc_req': profiles[i]['soc_req'],
-            't_dep': profiles[i]['duration'],
+            't_dep': t_dep,
             'dt': 1.0,
         }
         envs.append(EVClientEnv(cfg))
     return envs, profiles
 
 
+_HEURISTIC_CLASSES = {
+    'random':     RandomAgent,
+    'greedy':     GreedyAgent,
+    'edf':        EarliestDeadlineFirst,
+    'price_aware': PriceAwareAgent,
+    'simple_mpc': SimpleMPCAgent,
+}
+
+
 def _make_agents(policy, n_agents, input_dim, cfg, use_lora=False):
     """Instantiate N agents of the given policy type.
 
     Args:
-        use_lora: When True, agents are created with LoRA adapters.
-                  Only applies to neural-network policies (PPO, SAC).
+        policy:   One of 'qlearning', 'ppo', 'sac', or any key in _HEURISTIC_CLASSES.
+        use_lora: When True, agents are created with LoRA adapters (SAC/PPO only).
     """
     agents = []
     for _ in range(n_agents):
@@ -84,6 +123,15 @@ def _make_agents(policy, n_agents, input_dim, cfg, use_lora=False):
                 action_dim=1,
                 use_lora=use_lora,
             ))
+        elif policy in _HEURISTIC_CLASSES:
+            env_cfg = get_config('env')
+            agents.append(_HEURISTIC_CLASSES[policy](
+                soc_req=env_cfg.get('soc_target', 0.9),
+                capacity=env_cfg.get('battery_capacity', 60.0),
+                max_power=env_cfg.get('max_power', 7.0),
+                eta=env_cfg.get('eta', 0.95),
+                dt=env_cfg.get('dt', 1.0),
+            ))
         else:
             raise ValueError(f"Unknown policy: {policy}")
     return agents
@@ -93,11 +141,11 @@ def _action_to_power(agent, action, env, policy):
     """Convert raw agent output to physical power (kW)."""
     p_max = env._get_max_power(env.soc)
     if policy == 'qlearning':
-        # Discrete: 0=discharge, 1=idle, 2=charge
+        # Discrete: 0=idle, 1=half-charge, 2=full-charge (no V2G discharge)
         if action == 0:
-            return -p_max
-        elif action == 1:
             return 0.0
+        elif action == 1:
+            return p_max * 0.5
         else:
             return p_max
     else:
@@ -111,13 +159,26 @@ def _action_to_power(agent, action, env, policy):
 
 def run_single_experiment(
     policy='ppo',
-    aggregation='none',       # 'none' | 'fedavg' | 'fedopt'
+    aggregation='none',       # 'none' | 'fedavg' | 'fedopt' | 'fedprox' | 'fedavgm' | 'fedadam'
     verbose=True,
     progress_enabled=True,
     dev_mode=False,
     use_lora=False,
+    use_swift=False,
+    centralized=False,        # True → single shared SAC agent (oracle baseline)
+    mu_fedprox=0.01,          # FedProx proximal coefficient
+    beta_momentum=0.9,        # FedAvgM momentum coefficient
+    adam_lr=0.01,             # FedAdam server learning rate
+    dwell_time_hours=None,         # Dwell-time study: fix all agents' t_dep + sim_hours
+    swift_min_stay_override=None,  # Dwell-time study: override swift.yaml min_stay_hours
+    forecast_noise_std=0.0,        # Stress test: Gaussian σ on 5-hour price forecast ($/kWh)
+    non_iid_alpha=None,            # Stress test: Dirichlet α for driver-type distribution
+    archetype_set='nhts',          # Non-IID archetype table: 'nhts' (default) or 'acn'
+    tqdm_position=None,            # tqdm position for nested bars (None = auto)
+    tqdm_leave=True,               # tqdm leave for nested bars
     **extra_cfg,
 ):
+    print("Running single experiment... {policy} {aggregation}")
     """
     Train and evaluate a single policy+aggregation combination using YAML configs.
 
@@ -134,26 +195,33 @@ def run_single_experiment(
     n_episodes = train_cfg.get('num_episodes', 300)
     n_test_episodes = train_cfg.get('num_test_episodes', 10)
     n_agents = train_cfg.get('num_agents', 10)
-    sim_hours = train_cfg.get('simulation_hours', 24)
+    sim_hours = int(dwell_time_hours) if dwell_time_hours is not None \
+                else train_cfg.get('simulation_hours', 24)
     grid_type = train_cfg.get('grid_type', 'case33bw')
     
     ev_capacity = env_cfg.get('battery_capacity', 60.0)
     ev_max_power = env_cfg.get('max_power', 11.0)
     
-    # We use 2 edge servers for FHDP currently
-    n_edges = 2
-    fl_rounds_per_episode = 1
+    n_edges = train_cfg.get('num_edges', 2)
+    fl_rounds_per_episode = train_cfg.get('fl_rounds_per_episode', 1)
 
     combo_name = f"{policy}_{aggregation}"
+    if use_lora:
+        combo_name += '_lora'
+    if use_swift:
+        combo_name += '_swift'
+    if centralized:
+        combo_name += '_centralized'
     run_name = f"{combo_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+    _lr_defaults = {'qlearning': 0.1, 'ppo': 1e-4, 'sac': 3e-4}
     # Base configuration passed down (SAC loads its own via sac.yaml now)
     cfg = {
         'gamma': 0.99,
         'epsilon_init': 1.0,
         'epsilon_decay': 0.95,
         'epsilon_min': 0.05,
-        'learning_rate': {'qlearning': 0.1, 'ppo': 1e-4, 'sac': 3e-4}[policy],
+        'learning_rate': _lr_defaults.get(policy, 3e-4),
         'update_timestep': 240,
         'k_epochs': 10,
         'batch_size': 256,
@@ -175,13 +243,27 @@ def run_single_experiment(
 
     metrics = EvalMetrics(run_name=run_name, config=sim_config)
     grid = GridEnv(network_type=grid_type)
-    envs, profiles = _make_envs_and_profiles(n_agents, ev_capacity, ev_max_power)
+    envs, profiles = _make_envs_and_profiles(
+        n_agents, ev_capacity, ev_max_power,
+        fixed_dwell_hours=dwell_time_hours,
+        non_iid_alpha=non_iid_alpha,
+        n_edges=n_edges,
+        archetype_set=archetype_set,
+    )
     agent_bus_map = {i: (i % 30) + 2 for i in range(n_agents)}
 
     # Input dimension probe
     dummy_state = envs[0].get_state(0.0, 0.0, [0.0] * 5)
     input_dim = len(dummy_state)
-    agents = _make_agents(policy, n_agents, input_dim, cfg, use_lora=use_lora)
+
+    is_heuristic = policy in _HEURISTIC_CLASSES
+
+    if centralized:
+        # Centralized oracle: all agents share one SAC network and replay buffer
+        master_agent = SACAgent(input_dim=input_dim, action_dim=1)
+        agents = [master_agent] * n_agents
+    else:
+        agents = _make_agents(policy, n_agents, input_dim, cfg, use_lora=use_lora)
 
     if use_lora and policy != 'qlearning':
         lora_label = 'LoRA'
@@ -190,10 +272,26 @@ def run_single_experiment(
     if verbose:
         print(f"  [{combo_name}] Parameter mode: {lora_label}")
 
+    # --- SWIFT scheduler (if applicable) ---
+    scheduler = None
+    if use_swift:
+        from training.SWIFTScheduler import SWIFTScheduler
+        swift_cfg = get_config('swift')
+        if swift_min_stay_override is not None:
+            swift_cfg = dict(swift_cfg)  # shallow copy to avoid mutating global cache
+            swift_cfg['min_stay_hours'] = swift_min_stay_override
+        scheduler = SWIFTScheduler(n_agents=n_agents, config=swift_cfg)
+        if verbose:
+            print(f"  [{combo_name}] SWIFT: fraction={swift_cfg['fraction']}, "
+                  f"min_stay={swift_cfg['min_stay_hours']}h, "
+                  f"force_after={swift_cfg['force_select_after']}")
+
     # --- FL infrastructure (if applicable) ---
     server = None
     edges = []
-    if aggregation != 'none':
+    # Heuristics and centralized oracle skip FL entirely
+    _use_fl = aggregation != 'none' and not is_heuristic and not centralized
+    if _use_fl:
         # ── FL + LoRA guardrail ──
         # When LoRA is enabled, all agents MUST share identical frozen base
         # weights. We enforce this by broadcasting agent[0]'s full state dict
@@ -216,7 +314,13 @@ def run_single_experiment(
             if verbose:
                 print(f"  [{combo_name}] FL+LoRA: Base model synced across {n_agents} agents")
 
-        server = FederatedServer(strategy=aggregation)
+        # Choose server_lr: FedAdam uses adam_lr; others keep 1.0 (no server scaling)
+        _server_lr = adam_lr if aggregation == 'fedadam' else 1.0
+        server = FederatedServer(
+            strategy=aggregation,
+            server_lr=_server_lr,
+            beta=beta_momentum,
+        )
         server.initialize(agents[0].get_parameters())  # seed global model
 
         # Distribute vehicles across edges
@@ -229,9 +333,9 @@ def run_single_experiment(
     # ══════════════════════════════════════════════════════════════════
     desc = f"Train {combo_name}"
     
-    # We disable tqdm if either verbose is False or if progress_enabled is False
-    show_tqdm = verbose and progress_enabled
-    for episode in tqdm(range(n_episodes), desc=desc, disable=not show_tqdm):
+    show_tqdm = progress_enabled
+    for episode in tqdm(range(n_episodes), desc=desc, disable=not show_tqdm,
+                        position=tqdm_position, leave=tqdm_leave, ncols=90):
         total_reward = 0.0
         total_cost = 0.0
         grid.reset()
@@ -251,6 +355,9 @@ def run_single_experiment(
         for hour in range(sim_hours):
             price = DataGenerator.get_iso_ne_price(hour, mode='train')
             price_forecast = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='train') for h in range(5)]
+            if forecast_noise_std > 0.0:
+                price_forecast = [max(0.0, p + float(np.random.normal(0.0, forecast_noise_std)))
+                                  for p in price_forecast]
             base_load_mw = np.random.normal(3.5, 0.2)
 
             # -- aggregate target (for stability penalty) --
@@ -342,31 +449,70 @@ def run_single_experiment(
                 agent.epsilon = max(cfg['epsilon_min'], agent.epsilon * cfg['epsilon_decay'])
 
         # ── Federated aggregation round ──
-        if aggregation != 'none' and (episode + 1) % fl_rounds_per_episode == 0:
-            # 1) Vehicles → Edges
-            for edge in edges:
-                for vid in edge.vehicle_ids:
-                    n_samples = sim_hours  # each vehicle contributed sim_hours transitions
-                    edge.collect(vid, agents[vid].get_parameters(), n_samples)
+        if _use_fl and (episode + 1) % fl_rounds_per_episode == 0:
+            if scheduler is not None:
+                # SWIFT-filtered path
+                selected = scheduler.select_clients(
+                    agents, envs, profiles, current_round=episode
+                )
+                stats = scheduler.get_round_stats(selected, profiles)
+                metrics.log_swift_selection(episode, selected, stats)
 
-            # 2) Edges → Cloud
-            edge_updates = []
-            for edge in edges:
-                params, n = edge.aggregate()
-                if params is not None:
-                    edge_updates.append({'params': params, 'n_samples': n})
+                # Use edge aggregation path but filtered to selected agents
+                edge_updates = edges[0].collect_selected(agents, agent_bus_map, selected)
 
-            # 3) Cloud aggregation
-            if edge_updates:
-                global_params = server.aggregate(edge_updates)
+                if edge_updates:
+                    _t0 = time.time()
+                    global_params = server.aggregate(edge_updates)
+                    metrics.log_comm_overhead((time.time() - _t0) * 1000.0)
+                    # Broadcast to ALL agents (standard FL invariant)
+                    for agent in agents:
+                        agent.set_parameters(global_params)
+                    if aggregation == 'fedprox' and mu_fedprox > 0.0:
+                        for agent in agents:
+                            if hasattr(agent, 'set_fedprox_global'):
+                                agent.set_fedprox_global(global_params, mu_fedprox)
+            else:
+                # Existing path — untouched
+                # 1) Vehicles → Edges
+                for edge in edges:
+                    for vid in edge.vehicle_ids:
+                        n_samples = sim_hours
+                        edge.collect(vid, agents[vid].get_parameters(), n_samples)
 
-                # 4) Broadcast back to all vehicles
-                for agent in agents:
-                    agent.set_parameters(global_params)
+                # 2) Edges → Cloud
+                edge_updates = []
+                for edge in edges:
+                    params, n = edge.aggregate()
+                    if params is not None:
+                        edge_updates.append({'params': params, 'n_samples': n})
+
+                # 3) Cloud aggregation
+                if edge_updates:
+                    _t0 = time.time()
+                    global_params = server.aggregate(edge_updates)
+                    metrics.log_comm_overhead((time.time() - _t0) * 1000.0)
+
+                    # 4) Broadcast back to all vehicles
+                    for agent in agents:
+                        agent.set_parameters(global_params)
+                    if aggregation == 'fedprox' and mu_fedprox > 0.0:
+                        for agent in agents:
+                            if hasattr(agent, 'set_fedprox_global'):
+                                agent.set_fedprox_global(global_params, mu_fedprox)
 
         if verbose and (episode + 1) % 10 == 0:
             avg_r = np.mean(metrics.episode_rewards[-10:])
             print(f"  [{combo_name}] Ep {episode+1} | AvgR: {avg_r:.2f} | Cost: ${total_cost:.2f}")
+
+    # save models (skip heuristics; for centralized, save the single shared agent)
+    if centralized:
+        model_dir = os.path.join("results/trained_models")
+        save_agent_weights(agents[0], 0, model_dir)
+    elif policy in ['ppo', 'sac']:
+        model_dir = os.path.join("results/trained_models")
+        best_agent, agents_id = find_best_agent_by_reward(agents, policy)
+        save_agent_weights(best_agent, agents_id, model_dir)
 
     # ══════════════════════════════════════════════════════════════════
     # TESTING
@@ -389,6 +535,9 @@ def run_single_experiment(
         for hour in range(sim_hours):
             price = DataGenerator.get_iso_ne_price(hour, mode='test')
             pf = [DataGenerator.get_iso_ne_price((hour + h) % 24, mode='test') for h in range(5)]
+            if forecast_noise_std > 0.0:
+                pf = [max(0.0, p + float(np.random.normal(0.0, forecast_noise_std)))
+                      for p in pf]
             base_load = np.random.normal(3.8, 0.3)
 
             grid_inj = {}
@@ -406,6 +555,7 @@ def run_single_experiment(
 
             lambda_grid, grid_info = grid.step(grid_inj, base_load)
             ev_total_mw = float(sum(grid_inj.values()))
+            metrics.log_voltage_violation(grid_info.get('voltage_violations', 0) > 0)
 
             for i, agent in enumerate(agents):
                 if not active[i]:
@@ -427,9 +577,28 @@ def run_single_experiment(
                 env.episode_log = []
 
         metrics.log_episode(total_test_reward, mode='test')
+        metrics.log_final_soc(float(np.mean([envs[i].soc for i in range(n_agents)])))
+
+    
+    
+    
 
     return metrics
 
+
+def find_best_agent_by_reward(agents,policy):
+    """Find the agent with the highest reward."""
+    if policy == "sac":
+        best_id , best_agent = max(enumerate(agents), key=lambda x: max(x[1].buffer.rewards))
+    elif policy == "ppo":
+        best_id , best_agent = max(enumerate(agents), key=lambda x: max(x[1].buffer_rewards))
+    return best_agent, best_id
+
+
+def save_agent_weights(agent,agent_id,model_dir):
+    """Save the agent weights."""
+    agent.save_trained_model(model_dir, agent_id)
+    print(f"Agent {agent_id} weights saved to {model_dir}")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Full comparison across all combinations
@@ -724,3 +893,85 @@ def _plot_comparison(results, n_episodes):
     plt.savefig(save_path, dpi=150)
     print(f"\n-> Comparison plot saved to {save_path}")
     plt.close(fig)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Methods-from-config entry point
+# ────────────────────────────────────────────────────────────────────────────
+
+def _method_cfg_to_kwargs(method: dict) -> dict:
+    """Convert a training.yaml method entry to run_single_experiment kwargs."""
+    agent = method.get('agent', 'sac')
+    fed = method.get('federated', {})
+    centralized = method.get('centralized', False)
+
+    if centralized:
+        aggregation = 'none'
+    elif not fed.get('enabled', True):
+        aggregation = 'none'
+    else:
+        aggregation = fed.get('aggregation', 'fedavg')
+
+    return dict(
+        policy=agent,
+        aggregation=aggregation,
+        centralized=centralized,
+        use_lora=method.get('use_lora', False),
+        use_swift=method.get('use_swift', False),
+        mu_fedprox=fed.get('mu_fedprox', 0.01),
+        beta_momentum=fed.get('beta_momentum', 0.9),
+        adam_lr=fed.get('adam_lr', 0.01),
+    )
+
+
+def run_methods_from_config(dev_mode: bool = False, verbose: bool = True) -> dict:
+    """
+    Read the ``methods`` list from training.yaml and run each baseline in sequence.
+
+    Returns
+    -------
+    dict mapping method name → EvalMetrics object.
+    """
+    if dev_mode:
+        train_cfg = get_config('training_dev')
+    else:
+        train_cfg = get_config('training')
+
+    methods = train_cfg.get('methods', [])
+    if not methods:
+        print("[run_methods_from_config] No 'methods' section found in training.yaml.")
+        return {}
+
+    n_episodes = train_cfg.get('num_episodes', 300)
+    n_test_episodes = train_cfg.get('num_test_episodes', 10)
+    progress_cfg = train_cfg.get('progress', {})
+    progress_enabled = progress_cfg.get('enabled', True)
+
+    print(f"\n{'='*60}")
+    print(f"  METHODS PIPELINE: {len(methods)} baselines")
+    print(f"  Episodes: {n_episodes} train + {n_test_episodes} test each")
+    print(f"  Compute device : {device_info()}")
+    print(f"{'='*60}\n")
+
+    results = {}
+    for method in methods:
+        name = method.get('name', 'unknown')
+        print(f"\n--- Running: {name} ---")
+        kwargs = _method_cfg_to_kwargs(method)
+        try:
+            m = run_single_experiment(
+                verbose=verbose,
+                progress_enabled=progress_enabled,
+                dev_mode=dev_mode,
+                **kwargs,
+            )
+            m.plot_metrics()
+            results[name] = m
+            print(f"  ✓ Done: {name}")
+        except Exception as exc:
+            print(f"  ✗ FAILED: {name} — {exc}")
+
+    if results:
+        _plot_comparison(results, n_episodes)
+
+    return results

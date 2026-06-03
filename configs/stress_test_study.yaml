@@ -1,0 +1,73 @@
+# stress_test_study.yaml
+# Configuration for the robustness stress-test study (AAAI paper — Robustness Analysis)
+#
+# Scientific objective:
+#   Demonstrate that HFDRL degrades gracefully under two real-world imperfections:
+#   (1) Noisy price forecasts in the state vector (forecast error).
+#   (2) Non-IID charging demand across FL edges (data heterogeneity).
+
+# ── Sub-study A: Forecast Error ───────────────────────────────────────────────
+# Gaussian noise σ applied to the 5-hour price forecast (state[8:13]).
+# Actual reward prices are NOT noised — agent sees wrong predictions but
+# experiences true costs.  Expressed in $/kWh; typical price ≈ 0.09-0.22 $/kWh.
+forecast_noise_levels: [0.0, 0.02, 0.05, 0.10, 0.20]
+#                        0%   ~10%  ~25%  ~50%  ~100% relative noise
+
+# ── Sub-study B: Non-IID Data ─────────────────────────────────────────────────
+# Dirichlet concentration α controls inter-edge data heterogeneity.
+# Each FL edge gets type-proportions from Dirichlet([α,α,α]).
+# Lower α → more skewed proportions → stronger non-IID.
+non_iid_alphas: [1000.0, 10.0, 1.0, 0.5, 0.1]
+#                 ≈IID   mild   mod  high  extreme
+
+# Driver archetype table to use for non-IID profiles.
+# 'nhts' — NHTS 2017 calibrated (default, Bureau of Transportation Statistics)
+# 'acn'  — ACN-Data calibrated  (Lee et al., 2019, Caltech Adaptive Charging Network)
+archetype_set: nhts
+
+# ── Methods under study ───────────────────────────────────────────────────────
+methods:
+  - name: "FedAvg-SAC"
+    policy: sac
+    aggregation: fedavg
+    use_swift: false
+    use_lora: false
+
+  - name: "SWIFT-SAC"
+    policy: sac
+    aggregation: fedavg
+    use_swift: true
+    use_lora: false
+
+  - name: "HFDRL"
+    policy: sac
+    aggregation: fedavg
+    use_swift: true
+    use_lora: true
+
+# ── Statistical robustness ────────────────────────────────────────────────────
+seeds: [0, 1, 2, 42, 123]    # 5 seeds (ablation; main results use 10 seeds)
+ci_z: 1.96                   # z-score for 95% CI
+alpha_significance: 0.05     # significance level for t-test / Wilcoxon
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output_base: "results/stress_test_study"
+
+# ── Convergence detection (mirrors multiseed.yaml) ────────────────────────────
+convergence_window: 10
+convergence_threshold: 0.90
+smooth_window: 10
+
+# ── AAAI plot formatting (mirrors dwell_time_study.yaml) ──────────────────────
+plot:
+  dpi: 300
+  font_family: "serif"
+  font_size: 9
+  title_size: 10
+  legend_size: 8
+  label_size: 9
+  line_width: 1.5
+  ci_alpha: 0.18
+  figsize_single: [3.33, 2.6]
+  figsize_double: [7.0, 2.6]
+  figsize_wide:   [7.0, 4.2]

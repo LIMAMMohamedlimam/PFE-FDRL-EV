@@ -4,8 +4,10 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
-from collections import deque
-import random
+
+import os
+from utils.functions import ts
+
 from agents.BaseAgent import BaseAgent
 from utils.device_utils import get_device, device_info
 from utils.config_loader import get_config
@@ -20,28 +22,54 @@ from utils.lora import (
 # ---------------------------------------------------------------------------
 
 class ReplayBuffer:
-    """Fixed-size circular buffer for SAC off-policy learning."""
+    """Fixed-size circular buffer backed by pre-allocated numpy arrays.
+
+    Performance notes:
+    - Uses contiguous numpy arrays instead of deque-of-tuples
+    - Sampling uses np.random.randint (vectorised) instead of random.sample
+    - torch.as_tensor avoids an extra copy when dtype already matches
+    """
 
     def __init__(self, capacity=50_000):
-        self.buffer = deque(maxlen=capacity)
+        self.capacity = capacity
+        self.size = 0
+        self.pos = 0
+        self._initialised = False
+
+    def _init_arrays(self, state_dim):
+        """Lazily allocate storage once the state dimension is known."""
+        self.states = np.zeros((self.capacity, state_dim), dtype=np.float32)
+        self.actions = np.zeros(self.capacity, dtype=np.float32)
+        self.rewards = np.zeros(self.capacity, dtype=np.float32)
+        self.next_states = np.zeros((self.capacity, state_dim), dtype=np.float32)
+        self.dones = np.zeros(self.capacity, dtype=np.float32)
+        self._initialised = True
 
     def push(self, state, action, reward, next_state, done):
-        self.buffer.append((state, action, reward, next_state, done))
+        if not self._initialised:
+            self._init_arrays(len(state))
+        idx = self.pos
+        self.states[idx] = state
+        self.actions[idx] = action
+        self.rewards[idx] = reward
+        self.next_states[idx] = next_state
+        self.dones[idx] = done
+        self.pos = (self.pos + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size, device):
         """Sample a random batch and return tensors on the given device."""
-        batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        idxs = np.random.randint(0, self.size, size=batch_size)
         return (
-            torch.FloatTensor(np.array(states)).to(device),
-            torch.FloatTensor(np.array(actions)).unsqueeze(1).to(device),
-            torch.FloatTensor(np.array(rewards)).unsqueeze(1).to(device),
-            torch.FloatTensor(np.array(next_states)).to(device),
-            torch.FloatTensor(np.array(dones, dtype=np.float32)).unsqueeze(1).to(device),
+            torch.as_tensor(self.states[idxs], dtype=torch.float32).to(device),
+            torch.as_tensor(self.actions[idxs], dtype=torch.float32).unsqueeze(1).to(device),
+            torch.as_tensor(self.rewards[idxs], dtype=torch.float32).unsqueeze(1).to(device),
+            torch.as_tensor(self.next_states[idxs], dtype=torch.float32).to(device),
+            torch.as_tensor(self.dones[idxs], dtype=torch.float32).unsqueeze(1).to(device),
         )
 
     def __len__(self):
-        return len(self.buffer)
+        return self.size
 
 
 # ---------------------------------------------------------------------------
@@ -210,11 +238,17 @@ class SACAgent(BaseAgent):
         # --- Step counter ---
         self.total_steps = 0
 
+        # --- FedProx proximal regularization ---
+        self._fedprox_global_params = None
+        self.mu_fedprox = 0.0
+
     # ----- BaseAgent interface -----
 
     def get_action(self, state, eval_mode=False):
         """Return a scalar action in [-1, 1]."""
-        state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        state_t = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0)
+        if self.device.type != 'cpu':
+            state_t = state_t.to(self.device)
         with torch.no_grad():
             if eval_mode:
                 action = self.actor.deterministic(state_t)
@@ -286,6 +320,19 @@ class SACAgent(BaseAgent):
                 self.critic.load_state_dict(critic_sd)
                 self.critic_target.load_state_dict(critic_sd)
 
+    def set_fedprox_global(self, global_params: dict, mu: float = 0.01):
+        """Store the global model snapshot used by FedProx proximal regularisation.
+
+        Call this once after each FL aggregation round, before local training
+        resumes. The stored snapshot is used in _learn() to pull local weights
+        toward the global model.
+        """
+        self._fedprox_global_params = {
+            k: (v.copy() if hasattr(v, 'copy') else v)
+            for k, v in global_params.items()
+        }
+        self.mu_fedprox = mu
+
     # ----- Internal SAC learning -----
 
     def _learn(self):
@@ -306,7 +353,21 @@ class SACAgent(BaseAgent):
         q1_pred, q2_pred = self.critic(states, actions)
         critic_loss = F.mse_loss(q1_pred, td_target) + F.mse_loss(q2_pred, td_target)
 
-        self.critic_optim.zero_grad()
+        # FedProx: proximal term μ/2 ||w_critic - w_global_critic||²
+        if self._fedprox_global_params is not None and self.mu_fedprox > 0.0:
+            prox = torch.tensor(0.0, device=self.device)
+            for name, param in self.critic.named_parameters():
+                if not param.requires_grad:
+                    continue
+                key = f"critic.{name}"
+                if key in self._fedprox_global_params:
+                    w_g = torch.as_tensor(
+                        self._fedprox_global_params[key], dtype=torch.float32
+                    ).to(self.device)
+                    prox = prox + ((param - w_g) ** 2).sum()
+            critic_loss = critic_loss + (self.mu_fedprox / 2.0) * prox
+
+        self.critic_optim.zero_grad(set_to_none=True)
         critic_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optim.step()
@@ -317,22 +378,115 @@ class SACAgent(BaseAgent):
         q_new = torch.min(q1_new, q2_new)
         actor_loss = (self.alpha * log_probs - q_new).mean()
 
-        self.actor_optim.zero_grad()
+        # FedProx: proximal term μ/2 ||w_actor - w_global_actor||²
+        if self._fedprox_global_params is not None and self.mu_fedprox > 0.0:
+            prox = torch.tensor(0.0, device=self.device)
+            for name, param in self.actor.named_parameters():
+                if not param.requires_grad:
+                    continue
+                key = f"actor.{name}"
+                if key in self._fedprox_global_params:
+                    w_g = torch.as_tensor(
+                        self._fedprox_global_params[key], dtype=torch.float32
+                    ).to(self.device)
+                    prox = prox + ((param - w_g) ** 2).sum()
+            actor_loss = actor_loss + (self.mu_fedprox / 2.0) * prox
+
+        self.actor_optim.zero_grad(set_to_none=True)
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
         self.actor_optim.step()
 
         # ---- 3. Entropy temperature (alpha) auto-tune ----
         alpha_loss = -(self.log_alpha * (log_probs.detach() + self.target_entropy)).mean()
-        self.alpha_optim.zero_grad()
+        self.alpha_optim.zero_grad(set_to_none=True)
         alpha_loss.backward()
         self.alpha_optim.step()
         self.alpha = self.log_alpha.exp().item()
 
         # ---- 4. Soft-update target critic ----
-        for param, target_param in zip(
-            self.critic.parameters(), self.critic_target.parameters()
-        ):
-            target_param.data.copy_(
-                self.tau * param.data + (1.0 - self.tau) * target_param.data
-            )
+        with torch.no_grad():
+            for param, target_param in zip(
+                self.critic.parameters(), self.critic_target.parameters()
+            ):
+                target_param.data.copy_(
+                    self.tau * param.data + (1.0 - self.tau) * target_param.data
+                )
+
+    # ----- Model persistence -----
+
+    def save_trained_model(self, directory, agent_id):
+        """Save agent checkpoint (full weights or LoRA adapters).
+
+        Uses a single file per agent, matching the PPO/QLearning interface
+        so callers can do `agent.save_trained_model(dir, id)` uniformly.
+        """
+        os.makedirs(directory, exist_ok=True)
+
+        if self.use_lora:
+            filename = os.path.join(directory, f"sac_agent_lora_{agent_id}_{ts()}.pth")
+            # Save LoRA weights as raw tensors (NOT numpy) so that
+            # torch.load(..., weights_only=True) works in PyTorch 2.6+.
+            lora_state = {}
+            for name, param in self.actor.state_dict().items():
+                if 'lora_' in name:
+                    lora_state[f"actor.{name}"] = param.cpu()
+            for name, param in self.critic.state_dict().items():
+                if 'lora_' in name:
+                    lora_state[f"critic.{name}"] = param.cpu()
+            torch.save(lora_state, filename)
+            print(f"Saved LoRA adapters for agent {agent_id} to {filename}")
+        else:
+            filename = os.path.join(directory, f"sac_agent_{agent_id}.pth")
+            checkpoint = {
+                'actor': self.actor.state_dict(),
+                'critic': self.critic.state_dict(),
+                'critic_target': self.critic_target.state_dict(),
+                'log_alpha': self.log_alpha.detach().cpu(),
+                'alpha': self.alpha,
+            }
+            torch.save(checkpoint, filename)
+            print(f"Saved full model for agent {agent_id} to {filename}")
+
+    def load_trained_model(self, model_path):
+        """Load agent checkpoint (full weights or LoRA adapters).
+
+        Auto-detects the checkpoint format:
+          - Full checkpoint: dict with 'actor'/'critic' keys (state dicts)
+          - LoRA checkpoint: flat dict with 'actor.*lora*'/'critic.*lora*' keys
+        """
+        # weights_only=False needed for older LoRA checkpoints saved with numpy arrays
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+
+        # Auto-detect: full checkpoints have an 'actor' key holding a state dict
+        is_full_checkpoint = 'actor' in checkpoint and isinstance(checkpoint['actor'], dict)
+
+        if is_full_checkpoint:
+            self.actor.load_state_dict(checkpoint['actor'])
+            self.critic.load_state_dict(checkpoint['critic'])
+            # Prefer saved target; fall back to critic weights for older checkpoints
+            if 'critic_target' in checkpoint:
+                self.critic_target.load_state_dict(checkpoint['critic_target'])
+            else:
+                self.critic_target.load_state_dict(checkpoint['critic'])
+            # Restore entropy temperature
+            if 'log_alpha' in checkpoint:
+                self.log_alpha.data.copy_(checkpoint['log_alpha'].to(self.device))
+                self.alpha = checkpoint.get('alpha', self.log_alpha.exp().item())
+            print(f"Full weights loaded from {model_path}")
+        else:
+            # LoRA checkpoint: flat dict of prefixed lora weights
+            for network, prefix in [(self.actor, 'actor.'), (self.critic, 'critic.'),
+                                     (self.critic_target, 'critic.')]:
+                model_sd = network.state_dict()
+                prefix_len = len(prefix)
+                for key, value in checkpoint.items():
+                    if key.startswith(prefix) and 'lora_' in key:
+                        model_key = key[prefix_len:]
+                        if model_key in model_sd:
+                            # Handle both tensor and numpy values (backward compat)
+                            if isinstance(value, np.ndarray):
+                                value = torch.from_numpy(value)
+                            model_sd[model_key] = value.to(self.device)
+                network.load_state_dict(model_sd)
+            print(f"LoRA adapters loaded from {model_path}")
