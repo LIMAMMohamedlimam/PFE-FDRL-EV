@@ -1763,12 +1763,33 @@ def main():
     
     parser.add_argument(
         '--simulation',
-        type=int,
+        type=str,
         nargs='?',
-        help="Simulation type (depends on mode)"
+        help="Simulation type: integer (1-19) or named alias e.g. 'stressTest'"
     )
+    # Stress-test single-run shortcuts (used with --simulation stressTest or 19)
+    parser.add_argument('--sub-study',  dest='sub_study',
+                        choices=['forecast_error', 'non_iid'],
+                        help="Stress-test sub-study type")
+    parser.add_argument('--scenario',   type=float,
+                        help="Scenario value: σ for forecast_error or α for non_iid")
+    parser.add_argument('--method',
+                        choices=['FedAvg-SAC', 'SWIFT-SAC', 'HFDRL'],
+                        help="Method to evaluate")
+    parser.add_argument('--seed',       type=int,
+                        help="Random seed for the stress-test run")
+    parser.add_argument('--archetype',
+                        choices=['nhts', 'acn'], default='nhts',
+                        help="Driver archetype table for non_iid (default: nhts)")
 
     args = parser.parse_args()
+
+    # Coerce --simulation to int when the value is a plain number
+    if args.simulation is not None:
+        try:
+            args.simulation = int(args.simulation)
+        except ValueError:
+            pass  # keep as string alias, e.g. 'stressTest'
 
     # ================= STEP 1: Determine Dev or Train Mode =================
     if args.mode is None:
@@ -1894,8 +1915,19 @@ def main():
             run_dwell_study()
         elif args.simulation == 18:
             run_lora_network_study_menu()
-        elif args.simulation == 19:
-            run_stress_test_menu()
+        elif args.simulation in (19, 'stressTest'):
+            _all = (args.sub_study, args.scenario, args.method, args.seed)
+            if all(a is not None for a in _all):
+                run_single_stress_run(
+                    sub_study=args.sub_study,
+                    scenario_value=args.scenario,
+                    method_name=args.method,
+                    seed=args.seed,
+                    dev_mode=False,
+                    archetype_set=args.archetype,
+                )
+            else:
+                run_stress_test_menu()
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
@@ -1941,8 +1973,19 @@ def main():
             run_dwell_study(dev_mode=True)
         elif args.simulation == 18:
             run_lora_network_study_menu(dev_mode=True)
-        elif args.simulation == 19:
-            run_stress_test_menu(dev_mode=True)
+        elif args.simulation in (19, 'stressTest'):
+            _all = (args.sub_study, args.scenario, args.method, args.seed)
+            if all(a is not None for a in _all):
+                run_single_stress_run(
+                    sub_study=args.sub_study,
+                    scenario_value=args.scenario,
+                    method_name=args.method,
+                    seed=args.seed,
+                    dev_mode=True,
+                    archetype_set=args.archetype,
+                )
+            else:
+                run_stress_test_menu(dev_mode=True)
         elif args.simulation in (-1, -2):
             print("Please select a valid simulation (not the separator).")
             sys.exit(1)
