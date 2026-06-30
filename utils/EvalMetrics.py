@@ -1,9 +1,12 @@
+import logging
 import numpy as np
 import matplotlib.pyplot as plt
 import json
 import csv
 import os
 import time
+
+logger = logging.getLogger(__name__)
 
 class EvalMetrics:
     def __init__(self, run_name='metrics_plot', config=None):
@@ -138,7 +141,7 @@ class EvalMetrics:
                     self.satisfaction_history[i] if i < n_sat   else '',
                     self.test_rewards[i]         if i < n_test  else '',
                 ])
-        print(f"-> Data saved to {ep_csv_path}")
+        logger.info(f"-> Data saved to {ep_csv_path}")
 
         # ---- Timestep-level grid CSV -----------------------------------
         if self.grid_loads:
@@ -149,7 +152,7 @@ class EvalMetrics:
                 for i, load in enumerate(self.grid_loads):
                     delta = self.grid_power_changes[i - 1] if i > 0 else ''
                     writer.writerow([i, load, delta])
-            print(f"-> Grid data saved to {grid_csv_path}")
+            logger.info(f"-> Grid data saved to {grid_csv_path}")
 
         # ---- SWIFT selection CSV ---------------------------------------
         if self.swift_log:
@@ -160,7 +163,7 @@ class EvalMetrics:
             if 'selected_indices' in swift_df.columns:
                 swift_df['selected_indices'] = swift_df['selected_indices'].apply(str)
             swift_df.to_csv(swift_csv_path, index=False)
-            print(f"-> SWIFT selections saved to {swift_csv_path}")
+            logger.info(f"-> SWIFT selections saved to {swift_csv_path}")
 
         return ep_csv_path
 
@@ -201,7 +204,7 @@ class EvalMetrics:
         with open(json_path, 'w') as f:
             json.dump(data, f, indent=4)
         
-        print(f"-> Configuration saved to {json_path}")
+        logger.info(f"-> Configuration saved to {json_path}")
 
         # Also log the total execution time to the new execution_times.json
         from utils.time_logger import log_execution_time
@@ -264,7 +267,7 @@ class EvalMetrics:
         os.makedirs('results', exist_ok=True)
             
         plt.savefig(save_path)
-        print(f"-> Plot saved to {save_path}")
+        logger.info(f"-> Plot saved to {save_path}")
         
         # Save CSV data (auto-called here so no call sites need to change)
         self.save_csv()

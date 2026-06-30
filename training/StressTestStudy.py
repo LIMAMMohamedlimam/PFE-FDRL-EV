@@ -53,6 +53,7 @@ import torch
 from tqdm import tqdm
 
 from utils.config_loader import get_config
+from training.BaseStudy import BaseStudy
 from training.MultiSeedRunner import set_global_seed, extract_seed_metrics
 from training.ComparisonPipeline import run_single_experiment
 
@@ -90,37 +91,8 @@ METHOD_BY_NAME = {m['name']: m for m in STUDY_METHODS}
 SUB_STUDIES = ('forecast_error', 'non_iid', 'both')
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Logging setup (identical to DwellTimeStudy)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _setup_logger(output_dir: str) -> logging.Logger:
-    logger = logging.getLogger('stress_study')
-    logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
-
-    fmt = logging.Formatter('%(asctime)s  %(levelname)-7s  %(message)s',
-                            datefmt='%H:%M:%S')
-
-    class TqdmHandler(logging.StreamHandler):
-        def emit(self, record):
-            try:
-                tqdm.write(self.format(record))
-            except Exception:
-                self.handleError(record)
-
-    ch = TqdmHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-
-    os.makedirs(output_dir, exist_ok=True)
-    fh = logging.FileHandler(os.path.join(output_dir, 'study.log'), mode='a')
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
-
-    return logger
+    return BaseStudy.setup_logger(output_dir, 'stress_study')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,28 +111,19 @@ def _load_cfg() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _append_progress(progress_path: str, entry: dict) -> None:
-    with open(progress_path, 'a') as f:
-        f.write(json.dumps(entry) + '\n')
-        f.flush()
-        os.fsync(f.fileno())
+    BaseStudy.append_progress(progress_path, entry)
 
 
 def _update_aggregated_raw(raw_path: str, all_results: dict) -> None:
     """Rewrite aggregated_raw.json atomically (called after every method)."""
-    agg_raw = {}
-    for scenario_key, methods_dict in all_results.items():
-        agg_raw[str(scenario_key)] = {}
-        for mname, seed_list in methods_dict.items():
-            agg_raw[str(scenario_key)][mname] = [
-                {k: v for k, v in r.items() if not isinstance(v, list)}
-                for r in seed_list
-            ]
-    tmp = raw_path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(agg_raw, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, raw_path)
+    agg_raw = {
+        str(sc_key): {
+            mname: [{k: v for k, v in r.items() if not isinstance(v, list)} for r in seed_list]
+            for mname, seed_list in methods_dict.items()
+        }
+        for sc_key, methods_dict in all_results.items()
+    }
+    BaseStudy.atomic_write_json(raw_path, agg_raw)
 
 
 def _save_reproducibility_notes(
@@ -172,29 +135,13 @@ def _save_reproducibility_notes(
     archetype_set: str,
     logger: logging.Logger,
 ) -> None:
-    notes = {
-        'timestamp':      datetime.now().isoformat(),
-        'study':          'Robustness Stress Tests',
-        'sub_study':      sub_study,
-        'seeds':          seeds,
-        'n_seeds':        len(seeds),
-        'scenarios':      scenarios,
-        'methods':        [m['name'] for m in STUDY_METHODS],
-        'dev_mode':       dev_mode,
-        'archetype_set':  archetype_set,
-        'python_version': sys.version,
-        'numpy_version':  np.__version__,
-        'torch_version':  torch.__version__,
-        'cuda_available': torch.cuda.is_available(),
-        'rng_control': {
-            'python_random': 'random.seed(seed)',
-            'numpy':         'np.random.seed(seed)',
-            'torch':         'torch.manual_seed(seed)',
-            'torch_cuda':    'torch.cuda.manual_seed_all(seed)',
-            'cudnn':         'deterministic=True',
-            'env_hash':      'PYTHONHASHSEED=str(seed)',
-        },
-        'ci_formula': 'CI_95 = 1.96 * std / sqrt(n)',
+    notes = BaseStudy.base_repro_notes(seeds, dev_mode)
+    notes.update({
+        'study':         'Robustness Stress Tests',
+        'sub_study':     sub_study,
+        'scenarios':     scenarios,
+        'methods':       [m['name'] for m in STUDY_METHODS],
+        'archetype_set': archetype_set,
         'design_notes': {
             'forecast_error': (
                 'forecast_noise_std (σ in $/kWh) added to state[8:13] price forecast. '
@@ -206,12 +153,8 @@ def _save_reproducibility_notes(
                 f'Archetype set: {archetype_set}.'
             ),
         },
-    }
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, 'reproducibility_notes.json')
-    with open(path, 'w') as f:
-        json.dump(notes, f, indent=2)
-    logger.info(f"Reproducibility notes -> {path}")
+    })
+    BaseStudy.write_repro_notes(output_dir, notes, logger)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,20 +199,7 @@ def _run_one_seed(
     result = extract_seed_metrics(metrics, seed)
     result['wall_time_s'] = round(wall_time, 2)
 
-    os.makedirs(seed_dir, exist_ok=True)
-    np.save(os.path.join(seed_dir, 'reward_curve.npy'),
-            np.array(result['reward_curve'], dtype=np.float32))
-    np.save(os.path.join(seed_dir, 'cost_curve.npy'),
-            np.array(result['cost_curve'], dtype=np.float32))
-    np.save(os.path.join(seed_dir, 'satisfaction_curve.npy'),
-            np.array(result['satisfaction_curve'], dtype=np.float32))
-
-    scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
-    scalars['n_reward_episodes'] = len(result['reward_curve'])
-    with open(os.path.join(seed_dir, 'metrics.json'), 'w') as f:
-        json.dump(scalars, f, indent=2)
-
-    logger.debug(f"  saved -> {seed_dir}/metrics.json")
+    BaseStudy.save_seed_artifacts(result, seed_dir, logger)
     return result
 
 

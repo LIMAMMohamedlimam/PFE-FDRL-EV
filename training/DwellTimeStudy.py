@@ -45,6 +45,7 @@ import torch
 from tqdm import tqdm
 
 from utils.config_loader import get_config
+from training.BaseStudy import BaseStudy
 from training.MultiSeedRunner import set_global_seed, extract_seed_metrics
 from training.ComparisonPipeline import run_single_experiment
 
@@ -80,42 +81,8 @@ STUDY_METHODS = [
 METHOD_BY_NAME = {m['name']: m for m in STUDY_METHODS}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Logging setup
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _setup_logger(output_dir: str) -> logging.Logger:
-    """Create a logger that writes to both stdout and a log file immediately."""
-    logger = logging.getLogger('dwell_study')
-    logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
-
-    fmt = logging.Formatter('%(asctime)s  %(levelname)-7s  %(message)s',
-                            datefmt='%H:%M:%S')
-
-    # Console handler — use tqdm.write so it doesn't break progress bars
-    class TqdmHandler(logging.StreamHandler):
-        def emit(self, record):
-            try:
-                tqdm.write(self.format(record))
-            except Exception:
-                self.handleError(record)
-
-    ch = TqdmHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-
-    # File handler — flushed after every record
-    os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, 'study.log')
-    fh = logging.FileHandler(log_path, mode='a')
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    fh.terminator = '\n'
-    logger.addHandler(fh)
-
-    return logger
+    return BaseStudy.setup_logger(output_dir, 'dwell_study')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,52 +147,25 @@ def _run_one_seed(
     result['wall_time_s'] = round(wall_time, 2)
     result['dwell_hours'] = dwell_hours
 
-    os.makedirs(seed_dir, exist_ok=True)
-
-    np.save(os.path.join(seed_dir, 'reward_curve.npy'),
-            np.array(result['reward_curve'], dtype=np.float32))
-    np.save(os.path.join(seed_dir, 'cost_curve.npy'),
-            np.array(result['cost_curve'], dtype=np.float32))
-    np.save(os.path.join(seed_dir, 'satisfaction_curve.npy'),
-            np.array(result['satisfaction_curve'], dtype=np.float32))
-
-    scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
-    scalars['n_reward_episodes'] = len(result['reward_curve'])
-    with open(os.path.join(seed_dir, 'metrics.json'), 'w') as f:
-        json.dump(scalars, f, indent=2)
-
-    logger.debug(f"  saved metrics -> {seed_dir}/metrics.json")
+    BaseStudy.save_seed_artifacts(result, seed_dir, logger)
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Progress log  (written after every seed, readable while study runs)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _append_progress(progress_path: str, entry: dict) -> None:
-    """Append one JSON line to the rolling progress log."""
-    with open(progress_path, 'a') as f:
-        f.write(json.dumps(entry) + '\n')
-        f.flush()
-        os.fsync(f.fileno())
+    BaseStudy.append_progress(progress_path, entry)
 
 
 def _update_aggregated_raw(raw_path: str, all_results: dict) -> None:
-    """Rewrite aggregated_raw.json with current state (called after each method)."""
-    agg_raw = {}
-    for dwell_h, methods_dict in all_results.items():
-        agg_raw[str(dwell_h)] = {}
-        for mname, seed_list in methods_dict.items():
-            agg_raw[str(dwell_h)][mname] = [
-                {k: v for k, v in r.items() if not isinstance(v, list)}
-                for r in seed_list
-            ]
-    tmp = raw_path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(agg_raw, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, raw_path)  # atomic on POSIX
+    """Rewrite aggregated_raw.json atomically (called after each method)."""
+    agg_raw = {
+        str(dwell_h): {
+            mname: [{k: v for k, v in r.items() if not isinstance(v, list)}
+                    for r in seed_list]
+            for mname, seed_list in methods_dict.items()
+        }
+        for dwell_h, methods_dict in all_results.items()
+    }
+    BaseStudy.atomic_write_json(raw_path, agg_raw)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -475,39 +415,19 @@ def _save_reproducibility_notes(
     dev_mode: bool,
     logger: logging.Logger,
 ) -> None:
-    notes = {
-        'timestamp':       datetime.now().isoformat(),
+    notes = BaseStudy.base_repro_notes(seeds, dev_mode)
+    notes.update({
         'study':           'SWIFT Dwell-Time Analysis',
-        'seeds':           seeds,
-        'n_seeds':         len(seeds),
         'dwell_scenarios': dwell_hours,
         'methods':         [m['name'] for m in STUDY_METHODS],
-        'dev_mode':        dev_mode,
-        'python_version':  sys.version,
-        'numpy_version':   np.__version__,
-        'torch_version':   torch.__version__,
-        'cuda_available':  torch.cuda.is_available(),
-        'rng_control': {
-            'python_random': 'random.seed(seed)',
-            'numpy':         'np.random.seed(seed)',
-            'torch':         'torch.manual_seed(seed)',
-            'torch_cuda':    'torch.cuda.manual_seed_all(seed)',
-            'cudnn':         'deterministic=True',
-            'env_hash':      'PYTHONHASHSEED=str(seed)',
-        },
-        'ci_formula': 'CI_95 = 1.96 * std / sqrt(n)',
         'design_note': (
             'dwell_time_hours controls both sim_hours (episode length) and '
             'all agents t_dep. Each episode models one complete EV charging '
             'session of the given duration. SWIFT utility scoring selects the '
             'top 60% of agents by staleness + SOC gap + diversity each round.'
         ),
-    }
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, 'reproducibility_notes.json')
-    with open(path, 'w') as f:
-        json.dump(notes, f, indent=2)
-    logger.info(f"Reproducibility notes -> {path}")
+    })
+    BaseStudy.write_repro_notes(output_dir, notes, logger)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

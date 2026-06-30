@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import matplotlib.pyplot as plt
 import pandapower as pp
@@ -5,15 +6,13 @@ import pandapower.networks as nw
 from tqdm import tqdm
 from datetime import datetime
 
-# Import your local modules
 from env.EVClientEnv import EVClientEnv
 from env.GridEnv import GridEnv
 from utils.EvalMetrics import EvalMetrics
 from utils.DataLoader import DataGenerator
-
-# Import Agents
 from agents.QLearningAgent import QLearningAgent
-# from PPOAgent import PPOAgent  # Uncomment when you have the file
+
+logger = logging.getLogger(__name__)
 
 class SimulationRunner:
     """
@@ -76,7 +75,7 @@ class SimulationRunner:
 
     def train(self , mode='dev'):
         """Main Training Loop"""
-        print(f"--- Starting Training: {self.cfg['n_episodes']} Episodes ---")
+        logger.info(f"Starting training: {self.cfg['n_episodes']} episodes")
         
         from utils.config_loader import get_config
         if mode == 'dev':
@@ -95,19 +94,16 @@ class SimulationRunner:
             # Periodic Logging
             if (episode + 1) % 10 == 0:
                 avg_reward = np.mean(self.metrics.episode_rewards[-10:])
-                print(f"  Ep {episode+1} | Avg Reward: {avg_reward:.2f}")
+                logger.info(f"  Ep {episode+1} | Avg Reward: {avg_reward:.2f}")
 
     def evaluate(self):
         """Evaluation / Generalization Phase"""
-        print("--- Starting Evaluation (Test Phase) ---")
-        # Run a single test episode (or multiple if configured)
+        logger.info("Starting evaluation (test phase)")
         total_reward = self._run_episode(mode='test')
-        
-        # Final Metrics Calculation
-        print("\n--- Final Metrics ---")
+
         sigma_g = self.metrics.compute_stability_metric()
-        print(f"-> Grid Stability (sigma_g): {sigma_g:.4f} MW")
-        print(f"-> Test Reward: {total_reward:.2f}")
+        logger.info(f"Grid Stability (sigma_g): {sigma_g:.4f} MW")
+        logger.info(f"Test Reward: {total_reward:.2f}")
         
         self.metrics.plot_metrics()
 
@@ -212,9 +208,10 @@ class SimulationRunner:
 
     def _decay_exploration(self):
         """Decays epsilon if the agent has that attribute (Q-Learning)."""
+        from utils.constants import EPSILON_MIN, EPSILON_DECAY
         for agent in self.agents:
             if hasattr(agent, 'epsilon'):
-                agent.epsilon = max(0.05, agent.epsilon * 0.95)
+                agent.epsilon = max(EPSILON_MIN, agent.epsilon * EPSILON_DECAY)
 
     def _calculate_satisfaction(self):
         """Logs satisfaction metrics at end of episode."""

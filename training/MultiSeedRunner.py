@@ -30,6 +30,7 @@ import sys
 import json
 import random
 import time
+import logging
 import argparse
 from datetime import datetime
 
@@ -38,7 +39,11 @@ import torch
 from tqdm import tqdm
 
 from utils.config_loader import get_config
+from utils.constants import CONVERGENCE_WINDOW, CONVERGENCE_THRESHOLD
+from training.BaseStudy import BaseStudy
 from training.ComparisonPipeline import run_single_experiment, _method_cfg_to_kwargs
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,7 +67,11 @@ def set_global_seed(seed: int) -> None:
 # Metric extraction from EvalMetrics
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _convergence_episode(rewards: list, window: int = 10, threshold: float = 0.90) -> int:
+def _convergence_episode(
+    rewards: list,
+    window: int = CONVERGENCE_WINDOW,
+    threshold: float = CONVERGENCE_THRESHOLD,
+) -> int:
     """
     First episode where the rolling mean reaches `threshold` × final rolling mean.
     Returns -1 if the curve never converges by this criterion.
@@ -186,20 +195,7 @@ def run_multiseed_experiment(
             result = extract_seed_metrics(metrics, seed)
             result['wall_time_s'] = wall_time
 
-            # ── persist curves as .npy ─────────────────────────────────────
-            np.save(os.path.join(seed_dir, 'reward_curve.npy'),
-                    np.array(result['reward_curve'], dtype=np.float32))
-            np.save(os.path.join(seed_dir, 'cost_curve.npy'),
-                    np.array(result['cost_curve'], dtype=np.float32))
-            np.save(os.path.join(seed_dir, 'satisfaction_curve.npy'),
-                    np.array(result['satisfaction_curve'], dtype=np.float32))
-
-            # ── persist scalar metrics as JSON ─────────────────────────────
-            scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
-            scalars['n_reward_episodes'] = len(result['reward_curve'])
-            with open(os.path.join(seed_dir, 'metrics.json'), 'w') as f:
-                json.dump(scalars, f, indent=2)
-
+            BaseStudy.save_seed_artifacts(result, seed_dir)
             seed_results.append(result)
 
             # ── per-seed summary ────────────────────────────────────────────
@@ -291,12 +287,12 @@ def run_multiseed_pipeline(
     n_seeds   = len(seeds)
     n_methods = len(methods)
     total_runs = n_methods * n_seeds
-    print(f"\n{'='*65}")
-    print(f"  MULTI-SEED PIPELINE: {n_methods} methods × {n_seeds} seeds = {total_runs} runs")
-    print(f"  Seeds : {seeds}")
-    print(f"  Mode  : {'dev' if dev_mode else 'full'}")
-    print(f"  Output: {output_dir}")
-    print(f"{'='*65}\n")
+    logger.info('=' * 65)
+    logger.info(f"MULTI-SEED PIPELINE: {n_methods} methods × {n_seeds} seeds = {total_runs} runs")
+    logger.info(f"Seeds : {seeds}")
+    logger.info(f"Mode  : {'dev' if dev_mode else 'full'}")
+    logger.info(f"Output: {output_dir}")
+    logger.info('=' * 65)
 
     pipeline_t0 = time.time()
     all_results = {}
@@ -343,24 +339,23 @@ def run_multiseed_pipeline(
         json.dump(agg_raw, f, indent=2)
 
     pipeline_elapsed = time.time() - pipeline_t0
-    print(f"\n{'='*65}")
-    print(f"  PIPELINE COMPLETE in {_format_duration(pipeline_elapsed)}")
-    print(f"  Raw results saved to {output_dir}/aggregated_raw.json")
-    print(f"{'='*65}")
+    logger.info('=' * 65)
+    logger.info(f"PIPELINE COMPLETE in {_format_duration(pipeline_elapsed)}")
+    logger.info(f"Raw results saved to {output_dir}/aggregated_raw.json")
+    logger.info('=' * 65)
 
     # ── run statistical analysis + plotting ───────────────────────────────
     try:
         from utils.StatisticalAnalysis import StatisticalAnalysis
         from scripts.generate_multiseed_plots import generate_all_plots
 
-        print("\n  Running statistical analysis & plotting...")
+        logger.info("Running statistical analysis & plotting...")
         analysis = StatisticalAnalysis(all_results, agg_dir, ms_cfg)
         stats    = analysis.compute_and_save()
         generate_all_plots(all_results, stats, agg_dir, ms_cfg)
-        print(f"  ✓ Statistical analysis and plots written to {agg_dir}/")
+        logger.info(f"Statistical analysis and plots written to {agg_dir}/")
     except Exception as exc:
-        print(f"\n  [WARNING] Post-processing failed: {exc}")
-        import traceback; traceback.print_exc()
+        logger.warning(f"Post-processing failed: {exc}", exc_info=True)
 
     return all_results, output_dir
 
@@ -377,32 +372,11 @@ def _load_multiseed_cfg() -> dict:
 
 
 def _save_reproducibility_notes(output_dir: str, seeds: list, dev_mode: bool) -> None:
-    notes = {
-        'timestamp':     datetime.now().isoformat(),
-        'seeds':         seeds,
-        'n_seeds':       len(seeds),
-        'dev_mode':      dev_mode,
-        'python_version': sys.version,
-        'numpy_version':  np.__version__,
-        'torch_version':  torch.__version__,
-        'cuda_available': torch.cuda.is_available(),
-        'cudnn_deterministic': (
-            torch.backends.cudnn.deterministic if torch.cuda.is_available() else 'N/A'
-        ),
-        'rng_control': {
-            'python_random': 'random.seed(seed)',
-            'numpy':         'np.random.seed(seed)',
-            'torch':         'torch.manual_seed(seed)',
-            'torch_cuda':    'torch.cuda.manual_seed_all(seed)',
-            'cudnn':         'deterministic=True, benchmark=False',
-            'env_hash':      'PYTHONHASHSEED=str(seed)',
-        },
-        'ci_formula': 'CI_95 = 1.96 * (std / sqrt(n))',
-    }
-    path = os.path.join(output_dir, 'reproducibility_notes.json')
-    with open(path, 'w') as f:
-        json.dump(notes, f, indent=2)
-    print(f"-> Reproducibility notes saved to {path}")
+    notes = BaseStudy.base_repro_notes(seeds, dev_mode)
+    notes['cudnn_deterministic'] = (
+        torch.backends.cudnn.deterministic if torch.cuda.is_available() else 'N/A'
+    )
+    BaseStudy.write_repro_notes(output_dir, notes, logger)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

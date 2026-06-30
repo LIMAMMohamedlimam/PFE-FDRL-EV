@@ -33,20 +33,21 @@ methods:
     use_swift: false
     use_lora: false
 
-  - name: "SWIFT-SAC"
-    policy: sac
-    aggregation: fedavg
-    use_swift: true
-    use_lora: false
-
   - name: "HFDRL"
     policy: sac
     aggregation: fedavg
     use_swift: true
     use_lora: true
+  
+#  - name: "SWIFT-SAC"
+#    policy: sac
+#    aggregation: fedavg
+#    use_swift: true
+#    use_lora: false
 
 # ── Statistical robustness ────────────────────────────────────────────────────
-seeds: [0, 1, 2, 42, 123]    # 5 seeds (ablation; main results use 10 seeds)
+#seeds: [0, 1, 2, 42, 123]    # 5 seeds (ablation; main results use 10 seeds)
+seeds: [42]
 ci_z: 1.96                   # z-score for 95% CI
 alpha_significance: 0.05     # significance level for t-test / Wilcoxon
 

@@ -6,6 +6,7 @@ Unified runner that trains every combination of
 and produces comparative plots.
 """
 
+import logging
 import time
 import numpy as np
 import torch
@@ -18,6 +19,8 @@ import os
 import multiprocessing as mp
 from utils.functions import ts
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+logger = logging.getLogger(__name__)
 
 # Project modules
 from env.EVClientEnv import EVClientEnv
@@ -137,6 +140,44 @@ def _make_agents(policy, n_agents, input_dim, cfg, use_lora=False):
     return agents
 
 
+def _fl_round(
+    server, edges, agents, envs, profiles, scheduler,
+    agent_bus_map, episode, sim_hours, aggregation, mu_fedprox, metrics,
+):
+    """Execute one FL aggregation round (SWIFT-filtered or standard)."""
+    if scheduler is not None:
+        # SWIFT path: utility-scored client selection
+        selected = scheduler.select_clients(agents, envs, profiles, current_round=episode)
+        stats = scheduler.get_round_stats(selected, profiles)
+        metrics.log_swift_selection(episode, selected, stats)
+        edge_updates = edges[0].collect_selected(agents, agent_bus_map, selected)
+    else:
+        # Standard path: collect from all agents via edges
+        for edge in edges:
+            for vid in edge.vehicle_ids:
+                edge.collect(vid, agents[vid].get_parameters(), sim_hours)
+        edge_updates = []
+        for edge in edges:
+            params, n = edge.aggregate()
+            if params is not None:
+                edge_updates.append({'params': params, 'n_samples': n})
+
+    if not edge_updates:
+        return
+
+    _t0 = time.time()
+    global_params = server.aggregate(edge_updates)
+    metrics.log_comm_overhead((time.time() - _t0) * 1000.0)
+
+    for agent in agents:
+        agent.set_parameters(global_params)
+
+    if aggregation == 'fedprox' and mu_fedprox > 0.0:
+        for agent in agents:
+            if hasattr(agent, 'set_fedprox_global'):
+                agent.set_fedprox_global(global_params, mu_fedprox)
+
+
 def _action_to_power(agent, action, env, policy):
     """Convert raw agent output to physical power (kW)."""
     p_max = env._get_max_power(env.soc)
@@ -178,13 +219,16 @@ def run_single_experiment(
     tqdm_leave=True,               # tqdm leave for nested bars
     **extra_cfg,
 ):
-    print("Running single experiment... {policy} {aggregation}")
     """
     Train and evaluate a single policy+aggregation combination using YAML configs.
 
     Returns:
         metrics: EvalMetrics object with all logged data
     """
+    logger.info(f"Starting experiment: {policy}+{aggregation}"
+                f"{' lora' if use_lora else ''}{' swift' if use_swift else ''}"
+                f"{' centralized' if centralized else ''}"
+                f"  [{'dev' if dev_mode else 'full'}]")
     # Load configurations
     if dev_mode:
         train_cfg = get_config('training_dev')
@@ -270,7 +314,7 @@ def run_single_experiment(
     else:
         lora_label = 'Full'
     if verbose:
-        print(f"  [{combo_name}] Parameter mode: {lora_label}")
+        logger.info(f"  [{combo_name}] Parameter mode: {lora_label}")
 
     # --- SWIFT scheduler (if applicable) ---
     scheduler = None
@@ -282,9 +326,9 @@ def run_single_experiment(
             swift_cfg['min_stay_hours'] = swift_min_stay_override
         scheduler = SWIFTScheduler(n_agents=n_agents, config=swift_cfg)
         if verbose:
-            print(f"  [{combo_name}] SWIFT: fraction={swift_cfg['fraction']}, "
-                  f"min_stay={swift_cfg['min_stay_hours']}h, "
-                  f"force_after={swift_cfg['force_select_after']}")
+            logger.info(f"  [{combo_name}] SWIFT: fraction={swift_cfg['fraction']}, "
+                        f"min_stay={swift_cfg['min_stay_hours']}h, "
+                        f"force_after={swift_cfg['force_select_after']}")
 
     # --- FL infrastructure (if applicable) ---
     server = None
@@ -312,7 +356,7 @@ def run_single_experiment(
                     agent.policy.load_state_dict(sd)
                     agent.policy_old.load_state_dict(sd)
             if verbose:
-                print(f"  [{combo_name}] FL+LoRA: Base model synced across {n_agents} agents")
+                logger.info(f"  [{combo_name}] FL+LoRA: Base model synced across {n_agents} agents")
 
         # Choose server_lr: FedAdam uses adam_lr; others keep 1.0 (no server scaling)
         _server_lr = adam_lr if aggregation == 'fedadam' else 1.0
@@ -412,7 +456,6 @@ def run_single_experiment(
                     continue
                 raw, p_kw = actions[i]
                 r_t, done, _, energy_cost = envs[i].step(p_kw, lambda_grid, grid_info['max_voltage'] - 1.0, price)
-                # print(f"  [Debug] Agent {i} | Action: {p_kw:.2f} kW | Reward: {r_t:.2f} | Cost: ${energy_cost:.2f} | Penalty: {shared_penalty:.2f}")
                 total_cost += energy_cost
                 r_t += shared_penalty
                 s_next = envs[i].get_state(lambda_grid, grid_info['max_voltage'] - 1.0, price_forecast)
@@ -440,7 +483,6 @@ def run_single_experiment(
                 env.episode_log = []
 
         metrics.log_episode(total_reward, mode='train')
-        # print(f"Episode {episode+1}/{n_episodes} | Total Reward: {total_reward:.2f} | Total Cost: ${total_cost:.2f}")
         metrics.log_cost(total_cost)
 
         # Epsilon decay (Q-Learning)
@@ -450,60 +492,14 @@ def run_single_experiment(
 
         # ── Federated aggregation round ──
         if _use_fl and (episode + 1) % fl_rounds_per_episode == 0:
-            if scheduler is not None:
-                # SWIFT-filtered path
-                selected = scheduler.select_clients(
-                    agents, envs, profiles, current_round=episode
-                )
-                stats = scheduler.get_round_stats(selected, profiles)
-                metrics.log_swift_selection(episode, selected, stats)
-
-                # Use edge aggregation path but filtered to selected agents
-                edge_updates = edges[0].collect_selected(agents, agent_bus_map, selected)
-
-                if edge_updates:
-                    _t0 = time.time()
-                    global_params = server.aggregate(edge_updates)
-                    metrics.log_comm_overhead((time.time() - _t0) * 1000.0)
-                    # Broadcast to ALL agents (standard FL invariant)
-                    for agent in agents:
-                        agent.set_parameters(global_params)
-                    if aggregation == 'fedprox' and mu_fedprox > 0.0:
-                        for agent in agents:
-                            if hasattr(agent, 'set_fedprox_global'):
-                                agent.set_fedprox_global(global_params, mu_fedprox)
-            else:
-                # Existing path — untouched
-                # 1) Vehicles → Edges
-                for edge in edges:
-                    for vid in edge.vehicle_ids:
-                        n_samples = sim_hours
-                        edge.collect(vid, agents[vid].get_parameters(), n_samples)
-
-                # 2) Edges → Cloud
-                edge_updates = []
-                for edge in edges:
-                    params, n = edge.aggregate()
-                    if params is not None:
-                        edge_updates.append({'params': params, 'n_samples': n})
-
-                # 3) Cloud aggregation
-                if edge_updates:
-                    _t0 = time.time()
-                    global_params = server.aggregate(edge_updates)
-                    metrics.log_comm_overhead((time.time() - _t0) * 1000.0)
-
-                    # 4) Broadcast back to all vehicles
-                    for agent in agents:
-                        agent.set_parameters(global_params)
-                    if aggregation == 'fedprox' and mu_fedprox > 0.0:
-                        for agent in agents:
-                            if hasattr(agent, 'set_fedprox_global'):
-                                agent.set_fedprox_global(global_params, mu_fedprox)
+            _fl_round(
+                server, edges, agents, envs, profiles, scheduler,
+                agent_bus_map, episode, sim_hours, aggregation, mu_fedprox, metrics,
+            )
 
         if verbose and (episode + 1) % 10 == 0:
             avg_r = np.mean(metrics.episode_rewards[-10:])
-            print(f"  [{combo_name}] Ep {episode+1} | AvgR: {avg_r:.2f} | Cost: ${total_cost:.2f}")
+            logger.info(f"  [{combo_name}] Ep {episode+1} | AvgR: {avg_r:.2f} | Cost: ${total_cost:.2f}")
 
     # save models (skip heuristics; for centralized, save the single shared agent)
     if centralized:
@@ -595,10 +591,10 @@ def find_best_agent_by_reward(agents,policy):
     return best_agent, best_id
 
 
-def save_agent_weights(agent,agent_id,model_dir):
+def save_agent_weights(agent, agent_id, model_dir):
     """Save the agent weights."""
     agent.save_trained_model(model_dir, agent_id)
-    print(f"Agent {agent_id} weights saved to {model_dir}")
+    logger.info(f"Agent {agent_id} weights saved to {model_dir}")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Full comparison across all combinations
@@ -660,7 +656,7 @@ def _run_combo(args):
             dep_o[dt] = [model.sample_office_departure(dt) for _ in range(samples)]
         paper.plot_driver_distributions(arr_h, dep_h, arr_o, dep_o, save_dir=save_dir)
 
-        print(f'[PaperPlotter] Done → {save_dir}/')
+        logger.info(f'[PaperPlotter] Done → {save_dir}/')
 
     return combo_name, m
 
@@ -704,12 +700,12 @@ def run_comparison(
     progress_cfg = train_cfg.get('progress', {})
     progress_enabled = progress_cfg.get('enabled', True)
 
-    print(f"\n{'='*60}")
-    print(f"  COMPARISON PIPELINE: {n_combos} combinations")
-    print(f"  Episodes: {n_episodes} train + {n_test_episodes} test each")
-    print(f"  Compute device : {device_info()}")
-    print(f"  Parallel workers: {workers} / {cpu_count} CPU cores")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  COMPARISON PIPELINE: {n_combos} combinations")
+    logger.info(f"  Episodes: {n_episodes} train + {n_test_episodes} test each")
+    logger.info(f"  Compute device : {device_info()}")
+    logger.info(f"  Parallel workers: {workers} / {cpu_count} CPU cores")
+    logger.info(f"{'='*60}\n")
 
     # Build argument list for workers
     work_items = [
@@ -720,7 +716,7 @@ def run_comparison(
         # Single-process path: cleaner tracebacks during debugging
         for item in work_items:
             combo_name, m = _run_combo(item)
-            print(f"  ✓ Done: {combo_name}")
+            logger.info(f"  ✓ Done: {combo_name}")
             results[combo_name] = m
     else:
         # Multi-process path: true parallelism
@@ -740,13 +736,13 @@ def run_comparison(
                         if progress_enabled:
                             tqdm.write(f"  ✓ Done: {combo_name}")
                         else:
-                            print(f"  ✓ Done: {combo_name}")
+                            logger.info(f"  ✓ Done: {combo_name}")
                         results[combo_name] = m
                     except Exception as exc:
                         if progress_enabled:
                             tqdm.write(f"  ✗ FAILED: {label} — {exc}")
                         else:
-                            print(f"  ✗ FAILED: {label} — {exc}")
+                            logger.info(f"  ✗ FAILED: {label} — {exc}")
                     finally:
                         pbar.update(1)
 
@@ -891,7 +887,7 @@ def _plot_comparison(results, n_episodes):
 
     save_path = f"results/comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     plt.savefig(save_path, dpi=150)
-    print(f"\n-> Comparison plot saved to {save_path}")
+    logger.info(f"Comparison plot saved to {save_path}")
     plt.close(fig)
 
 
@@ -939,7 +935,7 @@ def run_methods_from_config(dev_mode: bool = False, verbose: bool = True) -> dic
 
     methods = train_cfg.get('methods', [])
     if not methods:
-        print("[run_methods_from_config] No 'methods' section found in training.yaml.")
+        logger.info("[run_methods_from_config] No 'methods' section found in training.yaml.")
         return {}
 
     n_episodes = train_cfg.get('num_episodes', 300)
@@ -947,16 +943,16 @@ def run_methods_from_config(dev_mode: bool = False, verbose: bool = True) -> dic
     progress_cfg = train_cfg.get('progress', {})
     progress_enabled = progress_cfg.get('enabled', True)
 
-    print(f"\n{'='*60}")
-    print(f"  METHODS PIPELINE: {len(methods)} baselines")
-    print(f"  Episodes: {n_episodes} train + {n_test_episodes} test each")
-    print(f"  Compute device : {device_info()}")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  METHODS PIPELINE: {len(methods)} baselines")
+    logger.info(f"  Episodes: {n_episodes} train + {n_test_episodes} test each")
+    logger.info(f"  Compute device : {device_info()}")
+    logger.info(f"{'='*60}\n")
 
     results = {}
     for method in methods:
         name = method.get('name', 'unknown')
-        print(f"\n--- Running: {name} ---")
+        logger.info(f"\n--- Running: {name} ---")
         kwargs = _method_cfg_to_kwargs(method)
         try:
             m = run_single_experiment(
@@ -967,9 +963,9 @@ def run_methods_from_config(dev_mode: bool = False, verbose: bool = True) -> dic
             )
             m.plot_metrics()
             results[name] = m
-            print(f"  ✓ Done: {name}")
+            logger.info(f"  ✓ Done: {name}")
         except Exception as exc:
-            print(f"  ✗ FAILED: {name} — {exc}")
+            logger.info(f"  ✗ FAILED: {name} — {exc}")
 
     if results:
         _plot_comparison(results, n_episodes)

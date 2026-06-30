@@ -1,111 +1,9 @@
-# import numpy as np
-
-# class EVClientEnv:
-#     """
-#     Handles the physical modeling and MDP formulation for a single EV.
-#     Based on Section 1.1 (Physical Model) and 2.3 (MDP Formulation).
-#     """
-#     def __init__(self, config):
-#         # Vehicle Parameters [cite: 13-17]
-#         self.capacity = config.get('capacity', 50.0)  # Ci in kWh
-#         self.eta = config.get('efficiency', 0.95)     # eta
-#         self.max_power_base = config.get('max_power', 7.0) # u_bar
-#         self.dt = config.get('dt', 1.0)               # Delta t (hours)
-        
-#         # User Requirements [cite: 24, 25]
-#         self.soc_req = config.get('soc_req', 0.9)     # Required SOC at departure
-#         self.t_dep = config.get('t_dep', 10)          # Departure time step
-        
-#         # Grid/Penalty weights [cite: 98, 121]
-#         self.alpha_satisfaction = config.get('alpha', 100.0) 
-#         self.beta_grid = config.get('beta', 1.0)
-        
-#         # State variables
-#         self.soc = config.get('initial_soc', 0.2)
-#         self.current_step = 0
-        
-#         # External signals (Mock data for Price and Grid Signal)
-#         self.forecast_horizon = config.get('H', 5)
-        
-#     def _get_max_power(self, soc):
-#         """
-#         Calculates P_max based on non-linear charging constraint.
-#         Formula: P_max = u_bar * (1 - alpha * SOC) 
-#         """
-#         alpha_constraint = 0.1 # Example coefficient
-#         return self.max_power_base * (1 - alpha_constraint * soc)
-
-#     def get_state(self, grid_signal, voltage_dev, price_forecast):
-#         """
-#         Constructs the state vector s_{i,t}.
-#         Definition: s_{i,t} = [SOC, t_remaining, Price_Forecast, Grid_Signal, Voltage_Dev]
-#         [cite: 85, 121]
-#         """
-#         t_remaining = self.t_dep - self.current_step
-        
-#         # Flatten the forecast into the state vector
-#         state = np.array([
-#             self.soc,
-#             t_remaining,
-#             grid_signal,      # lambda_grid
-#             voltage_dev       # delta_v
-#         ] + list(price_forecast)) # Lambda_{t:t+H}
-        
-#         return state
-
-#     def step(self, action_power, grid_signal, voltage_dev, price_current):
-#         """
-#         Executes one step in the environment.
-#         Args:
-#             action_power: P_{i,t} (Action)
-#         Returns:
-#             next_state, reward, done, info
-#         """
-#         # 1. Apply Constraints [cite: 21, 22]
-#         p_max = self._get_max_power(self.soc)
-#         # Clip power to feasible range [-P_max, P_max] (assuming symmetrical V2G)
-#         p_act = np.clip(action_power, -p_max, p_max)
-        
-#         # 2. Update Battery Dynamics 
-#         # SOC_{t+1} = SOC_t + (eta * P * dt) / C
-#         delta_soc = (self.eta * p_act * self.dt) / self.capacity
-#         prev_soc = self.soc
-#         self.soc = np.clip(self.soc + delta_soc, 0.0, 1.0)
-        
-#         self.current_step += 1
-        
-#         # 3. Calculate Reward [cite: 86-91, 121]
-#         # Term 1: Energy Cost
-#         r_cost = -(price_current * p_act * self.dt)
-        
-#         # Term 2: Grid Penalty (Voltage/Congestion)
-#         # Modeled as penalty on voltage deviation or grid signal
-#         r_grid = -self.beta_grid * (voltage_dev**2 + grid_signal * abs(p_act))
-        
-#         # Term 3: Satisfaction Penalty (Only at departure)
-#         r_satisfaction = 0
-#         done = False
-        
-#         if self.current_step >= self.t_dep:
-#             done = True
-#             if self.soc < self.soc_req:
-#                 # Penalty: alpha * (SOC_req - SOC_final)^2 [cite: 91]
-#                 r_satisfaction = -self.alpha_satisfaction * ((self.soc_req - self.soc)**2)
-        
-#         total_reward = r_cost + r_grid + r_satisfaction
-        
-#         return total_reward, done, self.soc
-
-
-
-
-
 import numpy as np
 import math
 
-# We use absolute imports to be robust across the modular structure
 from utils.config_loader import get_config
 from utils.reward_functions import compute_reward
+from utils.constants import PRICE_NORM_SCALE, EV_TOTAL_NORM_SCALE, EV_DELTA_NORM_SCALE
 
 # Location constants
 LOC_HOME    = 0
@@ -323,11 +221,11 @@ class EVClientEnv:
         s_volt = np.clip(voltage_dev * 10.0, -1.0, 1.0)
 
         # Price forecast
-        s_prices = [p / 0.50 for p in price_forecast]
+        s_prices = [p / PRICE_NORM_SCALE for p in price_forecast]
 
         # Aggregate EV load signals
-        s_ev_total = np.clip(ev_total_mw / 0.25,  0.0,  1.0)
-        s_ev_delta = np.clip(delta_ev_mw / 0.10, -1.0,  1.0)
+        s_ev_total = np.clip(ev_total_mw / EV_TOTAL_NORM_SCALE,  0.0,  1.0)
+        s_ev_delta = np.clip(delta_ev_mw / EV_DELTA_NORM_SCALE, -1.0,  1.0)
 
         features = [
             s_soc, t_sin, t_cos, t_remaining_norm,
