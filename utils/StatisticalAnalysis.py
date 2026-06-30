@@ -16,6 +16,7 @@ Usage (standalone, reload from disk):
     stats    = analysis.compute_and_save()
 """
 
+import logging
 import os
 import json
 import math
@@ -23,6 +24,10 @@ import csv
 
 import numpy as np
 from scipy import stats as scipy_stats
+
+from utils.constants import CI_Z_95, ALPHA_SIGNIFICANCE
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,8 +93,8 @@ class StatisticalAnalysis:
         self.all_results = all_results
         self.output_dir  = output_dir
         self.ms_cfg      = ms_cfg or {}
-        self.ci_z        = float(self.ms_cfg.get('ci_z', 1.96))
-        self.alpha       = float(self.ms_cfg.get('alpha', 0.05))
+        self.ci_z        = float(self.ms_cfg.get('ci_z', CI_Z_95))
+        self.alpha       = float(self.ms_cfg.get('alpha', ALPHA_SIGNIFICANCE))
         self.stats       = {}                # populated by compute()
 
     # ── constructor from disk ─────────────────────────────────────────────────
@@ -284,7 +289,7 @@ class StatisticalAnalysis:
         path = os.path.join(self.output_dir, 'tables', 'performance_table.tex')
         with open(path, 'w') as f:
             f.write('\n'.join(lines))
-        print(f"-> LaTeX table saved to {path}")
+        logger.info(f"-> LaTeX table saved to {path}")
         return path
 
     # ── CSV table ─────────────────────────────────────────────────────────────
@@ -308,7 +313,7 @@ class StatisticalAnalysis:
                         _safe(ms['ci_high']),
                         ms['n'],
                     ])
-        print(f"-> CSV table saved to {path}")
+        logger.info(f"-> CSV table saved to {path}")
         return path
 
     # ── Significance table ─────────────────────────────────────────────────────
@@ -377,7 +382,7 @@ class StatisticalAnalysis:
                     s.get('n_paired', ''),
                 ])
 
-        print(f"-> Significance tables saved to {tex_path}, {csv_path}")
+        logger.info(f"-> Significance tables saved to {tex_path}, {csv_path}")
         self._save_sig_json(sig)
         return tex_path
 
@@ -385,7 +390,7 @@ class StatisticalAnalysis:
         path = os.path.join(self.output_dir, 'statistics', 'significance_report.json')
         with open(path, 'w') as f:
             json.dump(sig, f, indent=2)
-        print(f"-> Significance report saved to {path}")
+        logger.info(f"-> Significance report saved to {path}")
 
     def _save_full_stats_json(self) -> None:
         """Save full statistics (without raw value lists) to JSON."""
@@ -397,7 +402,7 @@ class StatisticalAnalysis:
         path = os.path.join(self.output_dir, 'statistics', 'full_stats.json')
         with open(path, 'w') as f:
             json.dump(out, f, indent=2)
-        print(f"-> Full statistics saved to {path}")
+        logger.info(f"-> Full statistics saved to {path}")
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

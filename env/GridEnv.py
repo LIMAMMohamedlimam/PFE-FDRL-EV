@@ -3,6 +3,8 @@ import pandapower.networks as nw
 import pandas as pd
 import numpy as np
 
+from utils.constants import VOLTAGE_MIN, VOLTAGE_MAX, VOLTAGE_BAND
+
 class GridEnv:
     """
     Modélisation de l'environnement Grid (Niveau Edge/Distribution).
@@ -17,9 +19,8 @@ class GridEnv:
             # Placeholder pour charger un fichier json/sql personnalisé si besoin
             self.net = nw.case14() 
             
-        # Configuration des limites de tension [cite: 33]
-        self.v_min = 0.95
-        self.v_max = 1.05
+        self.v_min = VOLTAGE_MIN
+        self.v_max = VOLTAGE_MAX
         
         # Mapping des bus de charge (exclure le bus de référence/slack)
         self.load_buses = self.net.load.bus.values
@@ -64,8 +65,7 @@ class GridEnv:
             max_deviation = float(np.max(np.abs(vm_pu - 1.0)))
             voltage_violations = int(np.sum((vm_pu < self.v_min) | (vm_pu > self.v_max)))
 
-            # Continuous lambda_grid: scale deviation by 0.05 p.u. band
-            lambda_grid = float(np.clip(max_deviation / 0.05, 0.0, 2.0))
+            lambda_grid = float(np.clip(max_deviation / VOLTAGE_BAND, 0.0, 2.0))
             min_v = float(np.min(vm_pu))
             max_v = float(np.max(vm_pu))
         else:

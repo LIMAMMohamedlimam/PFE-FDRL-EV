@@ -57,6 +57,7 @@ import torch
 from tqdm import tqdm
 
 from utils.config_loader import get_config
+from training.BaseStudy import BaseStudy
 from training.MultiSeedRunner import set_global_seed, extract_seed_metrics
 from training.ComparisonPipeline import run_single_experiment
 
@@ -94,40 +95,8 @@ _DEFAULT_SCENARIOS = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Logging setup
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _setup_logger(output_dir: str) -> logging.Logger:
-    """Dual-sink logger: tqdm-safe console (INFO) + file (DEBUG), flush every record."""
-    logger = logging.getLogger('lora_network_study')
-    logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()
-
-    fmt = logging.Formatter('%(asctime)s  %(levelname)-7s  %(message)s',
-                            datefmt='%H:%M:%S')
-
-    class TqdmHandler(logging.StreamHandler):
-        def emit(self, record):
-            try:
-                tqdm.write(self.format(record))
-            except Exception:
-                self.handleError(record)
-
-    ch = TqdmHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-
-    os.makedirs(output_dir, exist_ok=True)
-    log_path = os.path.join(output_dir, 'study.log')
-    fh = logging.FileHandler(log_path, mode='a')
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    fh.terminator = '\n'
-    logger.addHandler(fh)
-
-    return logger
+    return BaseStudy.setup_logger(output_dir, 'lora_network_study')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,32 +145,17 @@ def _safe_name(name: str) -> str:
                 .replace('(', '').replace(')', '').replace('+', 'plus'))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Progress log helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _append_progress(progress_path: str, entry: dict) -> None:
-    """Append one JSON line to the rolling progress log (fsynced)."""
-    with open(progress_path, 'a') as f:
-        f.write(json.dumps(entry) + '\n')
-        f.flush()
-        os.fsync(f.fileno())
+    BaseStudy.append_progress(progress_path, entry)
 
 
 def _update_aggregated_raw(raw_path: str, all_results: dict) -> None:
     """Rewrite aggregated_raw.json atomically (scalar-only view)."""
-    agg_raw = {}
-    for mname, seed_list in all_results.items():
-        agg_raw[mname] = [
-            {k: v for k, v in r.items() if not isinstance(v, list)}
-            for r in seed_list
-        ]
-    tmp = raw_path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(agg_raw, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, raw_path)
+    agg_raw = {
+        mname: [{k: v for k, v in r.items() if not isinstance(v, list)} for r in seed_list]
+        for mname, seed_list in all_results.items()
+    }
+    BaseStudy.atomic_write_json(raw_path, agg_raw)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,21 +203,7 @@ def _run_one_seed(
     result = extract_seed_metrics(metrics, seed)
     result['wall_time_s'] = round(wall_time, 2)
 
-    os.makedirs(seed_dir, exist_ok=True)
-
-    np.save(os.path.join(seed_dir, 'reward_curve.npy'),
-            np.array(result['reward_curve'], dtype=np.float32))
-    np.save(os.path.join(seed_dir, 'cost_curve.npy'),
-            np.array(result['cost_curve'], dtype=np.float32))
-    np.save(os.path.join(seed_dir, 'satisfaction_curve.npy'),
-            np.array(result['satisfaction_curve'], dtype=np.float32))
-
-    scalars = {k: v for k, v in result.items() if not isinstance(v, list)}
-    scalars['n_reward_episodes'] = len(result['reward_curve'])
-    with open(os.path.join(seed_dir, 'metrics.json'), 'w') as f:
-        json.dump(scalars, f, indent=2)
-
-    logger.debug(f"  saved -> {seed_dir}/metrics.json")
+    BaseStudy.save_seed_artifacts(result, seed_dir, logger)
     return result
 
 
@@ -453,8 +393,8 @@ def _save_reproducibility_notes(
     dev_mode: bool,
     logger: logging.Logger,
 ) -> None:
-    notes = {
-        'timestamp':        datetime.now().isoformat(),
+    notes = BaseStudy.base_repro_notes(seeds, dev_mode)
+    notes.update({
         'study':            'LoRA Network Constraints Study',
         'study_design':     (
             'Two-phase: '
@@ -466,31 +406,11 @@ def _save_reproducibility_notes(
             'Bandwidth scenarios are ANALYTICAL ONLY — no real network throttling. '
             'RL training quality (reward, SoC, cost) is identical across all BW scenarios.'
         ),
-        'seeds':            seeds,
-        'n_seeds':          len(seeds),
         'methods':          [m['name'] for m in methods],
         'bandwidth_scenarios': [sc['name'] for sc in scenarios],
         'n_training_runs':  len(methods) * len(seeds),
-        'dev_mode':         dev_mode,
-        'python_version':   sys.version,
-        'numpy_version':    np.__version__,
-        'torch_version':    torch.__version__,
-        'cuda_available':   torch.cuda.is_available(),
-        'rng_control': {
-            'python_random': 'random.seed(seed)',
-            'numpy':         'np.random.seed(seed)',
-            'torch':         'torch.manual_seed(seed)',
-            'torch_cuda':    'torch.cuda.manual_seed_all(seed)',
-            'cudnn':         'deterministic=True',
-            'env_hash':      'PYTHONHASHSEED=str(seed)',
-        },
-        'ci_formula': 'CI_95 = 1.96 * std / sqrt(n)',
-    }
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, 'reproducibility_notes.json')
-    with open(path, 'w') as f:
-        json.dump(notes, f, indent=2)
-    logger.info(f"Reproducibility notes -> {path}")
+    })
+    BaseStudy.write_repro_notes(output_dir, notes, logger)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
