@@ -31,6 +31,7 @@ import json
 import random
 import time
 import logging
+import warnings
 import argparse
 from datetime import datetime
 
@@ -60,7 +61,16 @@ def set_global_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed)
+    _current_hashseed = os.environ.get('PYTHONHASHSEED')
+    os.environ['PYTHONHASHSEED'] = str(seed)  # propagates to child processes
+    if _current_hashseed != str(seed):
+        warnings.warn(
+            f"PYTHONHASHSEED is not controlled in this process (expected '{seed}', "
+            f"got '{_current_hashseed}'). Hash randomization for dicts/sets is NOT "
+            f"reproducible. Launch with: PYTHONHASHSEED={seed} python main.py",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

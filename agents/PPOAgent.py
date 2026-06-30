@@ -272,21 +272,26 @@ class PPOAgent(BaseAgent):
             self.policy_old.load_state_dict(new_state_dict)
 
     def save_trained_model(self, directory, agent_id):
+        os.makedirs(directory, exist_ok=True)
         if self.use_lora:
             filename = os.path.join(directory, f"ppo_agent_lora_{agent_id}.pth")
-            torch.save(self.state_dict(), filename)
+            torch.save(get_lora_state_dict(self.policy, prefix=''), filename)
             print(f"Saved LoRA adapters for agent {agent_id} to {filename}")
         else:
             filename = os.path.join(directory, f"ppo_agent_{agent_id}.pth")
-            torch.save(self.state_dict(), filename)
+            torch.save(self.policy.state_dict(), filename)
             print(f"Saved full model for agent {agent_id} to {filename}")
 
     def load_trained_model(self, directory, agent_id):
         if self.use_lora:
             filename = os.path.join(directory, f"ppo_agent_lora_{agent_id}.pth")
-            self.load_state_dict(torch.load(filename))
+            params = torch.load(filename, map_location=self.device, weights_only=True)
+            load_lora_state_dict(self.policy, params, prefix='', device=self.device)
+            self.policy_old.load_state_dict(self.policy.state_dict())
             print(f"Loaded LoRA adapters for agent {agent_id} from {filename}")
         else:
             filename = os.path.join(directory, f"ppo_agent_{agent_id}.pth")
-            self.load_state_dict(torch.load(filename))
+            sd = torch.load(filename, map_location=self.device, weights_only=True)
+            self.policy.load_state_dict(sd)
+            self.policy_old.load_state_dict(sd)
             print(f"Loaded full model for agent {agent_id} from {filename}")
