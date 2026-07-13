@@ -6,7 +6,9 @@ Unified runner that trains every combination of
 and produces comparative plots.
 """
 
+import json
 import logging
+import subprocess
 import time
 import numpy as np
 import torch
@@ -43,6 +45,15 @@ from utils.config_loader import get_config
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
+
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
 
 def _make_envs_and_profiles(
     n_agents,
@@ -155,7 +166,8 @@ def _fl_round(
         # Standard path: collect from all agents via edges
         for edge in edges:
             for vid in edge.vehicle_ids:
-                edge.collect(vid, agents[vid].get_parameters(), sim_hours)
+                _w = len(agents[vid].buffer) if hasattr(agents[vid], 'buffer') else sim_hours
+                edge.collect(vid, agents[vid].get_parameters(), _w)
         edge_updates = []
         for edge in edges:
             params, n = edge.aggregate()
@@ -402,7 +414,7 @@ def run_single_experiment(
             if forecast_noise_std > 0.0:
                 price_forecast = [max(0.0, p + float(np.random.normal(0.0, forecast_noise_std)))
                                   for p in price_forecast]
-            base_load_mw = np.random.normal(3.5, 0.2)
+            base_load_mw = np.random.normal(3.5, 0.2)  # base grid load (MW) — same distribution for train and test
 
             # -- aggregate target (for stability penalty) --
             p_target_kw = 0.0
@@ -502,13 +514,25 @@ def run_single_experiment(
             logger.info(f"  [{combo_name}] Ep {episode+1} | AvgR: {avg_r:.2f} | Cost: ${total_cost:.2f}")
 
     # save models (skip heuristics; for centralized, save the single shared agent)
+    model_dir = os.path.join("results", run_name, "checkpoints")
     if centralized:
-        model_dir = os.path.join("results/trained_models")
         save_agent_weights(agents[0], 0, model_dir)
     elif policy in ['ppo', 'sac']:
-        model_dir = os.path.join("results/trained_models")
         best_agent, agents_id = find_best_agent_by_reward(agents, policy)
         save_agent_weights(best_agent, agents_id, model_dir)
+
+    if centralized or policy in ['ppo', 'sac']:
+        meta_path = os.path.join("results", run_name, "run_metadata.json")
+        os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+        with open(meta_path, 'w') as _f:
+            json.dump({
+                'run_name':        run_name,
+                'timestamp':       datetime.now().isoformat(),
+                'git_commit':      _git_commit(),
+                'config':          sim_config,
+                'checkpoints_dir': model_dir,
+            }, _f, indent=2)
+        logger.info(f"run_metadata.json -> {meta_path}")
 
     # ══════════════════════════════════════════════════════════════════
     # TESTING
@@ -534,7 +558,7 @@ def run_single_experiment(
             if forecast_noise_std > 0.0:
                 pf = [max(0.0, p + float(np.random.normal(0.0, forecast_noise_std)))
                       for p in pf]
-            base_load = np.random.normal(3.8, 0.3)
+            base_load = np.random.normal(3.5, 0.2)
 
             grid_inj = {}
             actions = {}

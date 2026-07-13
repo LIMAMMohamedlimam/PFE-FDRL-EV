@@ -71,8 +71,8 @@ class GridEnv:
         else:
             voltage_violations = -1
             lambda_grid = 2.0
-            min_v = float('nan')
-            max_v = float('nan')
+            min_v = self.v_min
+            max_v = self.v_max
         info = {
             'converged': converged,
             'voltage_violations': voltage_violations,

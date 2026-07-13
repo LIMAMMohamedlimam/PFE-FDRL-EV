@@ -439,11 +439,15 @@ class SACAgent(BaseAgent):
         else:
             filename = os.path.join(directory, f"sac_agent_{agent_id}.pth")
             checkpoint = {
+                'format_version': 1,
                 'actor': self.actor.state_dict(),
                 'critic': self.critic.state_dict(),
                 'critic_target': self.critic_target.state_dict(),
                 'log_alpha': self.log_alpha.detach().cpu(),
                 'alpha': self.alpha,
+                'actor_optimizer': self.actor_optim.state_dict(),
+                'critic_optimizer': self.critic_optim.state_dict(),
+                'alpha_optimizer': self.alpha_optim.state_dict(),
             }
             torch.save(checkpoint, filename)
             print(f"Saved full model for agent {agent_id} to {filename}")
