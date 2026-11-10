@@ -4,17 +4,27 @@ A simulation framework implementing **Hierarchical Federated Deep Reinforcement 
 
 ---
 
-## Headline Results
+## Experimental Results and Reproducibility
 
-| Metric | FedAvg-SAC | SWIFT-SAC | **HFDRL** |
-|--------|-----------|-----------|-----------|
-| Mean test reward | — | — | **—** |
-| Charging cost ($/ep) | — | — | **—** |
-| Voltage violations (%) | — | — | **—** |
-| Comm. overhead (MB/round) | — | — | **—** |
-| Final SOC ≥ 0.9 (%) | — | — | **—** |
+- **1,000-episode comparison.** All evaluated policies met 100% of the
+  departure battery targets in the nominal and increased-load test scenarios.
+  Under increased load, HFDRL with LoRA used 82.8% less vehicle uplink tensor
+  data than HFDRL without LoRA at the first observed checkpoint reaching at
+  least 80% target attainment. The reduction is averaged over five paired seeds.
+- **200-episode reward-ablation pilot.** Under increased load, 31.8% of
+  departures met their battery target when the explicit grid term was removed
+  from the training reward, compared with 0% for full HFDRL in this pilot.
 
-> Numbers will be populated from the multi-seed statistical evaluation (`python main.py` → option 16). See [`docs/reproducing_results.md`](docs/reproducing_results.md) (P1).
+The two campaigns use different training budgets and SAC settings and are
+reported separately.
+
+- [Reproducibility guide](reproducibility/REPRODUCIBILITY.md)
+- [1,000-episode comparison archive](reproducibility/HFDRL_Comparaison_1000_episodes.zip)
+- [200-episode reward-ablation archive](reproducibility/HFDRL_Evaluation_Ablation_Reward.zip)
+- [Archived release on Zenodo](https://doi.org/10.5281/zenodo.24088975)
+
+The guide explains how to rebuild the tables from the saved results and how
+to rerun the experiments using the pinned simulator revision and patches.
 
 ---
 
